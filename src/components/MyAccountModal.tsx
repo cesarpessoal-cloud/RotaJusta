@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import QRCode from 'qrcode';
 import {
+  Bike,
+  Camera,
   Check,
   CheckCircle2,
   Copy,
@@ -12,6 +14,8 @@ import {
   Shield,
   ShieldCheck,
   ShieldOff,
+  Trash2,
+  Truck,
   User,
   X,
 } from 'lucide-react';
@@ -20,18 +24,34 @@ import {
   enableTwoFactorInSupabase,
   updateAccessPinInSupabase,
   updateBasicAccountInfoInSupabase,
+  updateCourierIdentityInSupabase,
   updateLoginIdentifierInSupabase,
   updatePixKeyInSupabase,
 } from '../lib/supabaseService';
-import { PixKeyType, Profile } from '../types';
+import {
+  PixKeyType,
+  Profile,
+  PropulsionType,
+  VehicleType,
+} from '../types';
+import {
+  formatPlateInput,
+  isValidBrazilianPlate,
+} from '../utils/courierIdentity';
 import { formatCpfOrCnpj } from '../utils/documentValidation';
 import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
+import { compressImageToJpeg } from '../utils/imageCompression';
 import {
   getPixKeyPlaceholder,
   inferPixKeyType,
   PIX_KEY_TYPES,
 } from '../utils/pix';
 import { buildOtpAuthUri, generateBase32Secret } from '../utils/totp';
+import {
+  getPropulsionOptionsForVehicle,
+  VEHICLE_CATEGORIES,
+} from '../utils/vehicleCompatibility';
+import { CourierAvatar } from './CourierAvatar';
 
 interface MyAccountModalProps {
   currentUser: Profile;
@@ -54,6 +74,32 @@ export function MyAccountModal({
   const [basicMsg, setBasicMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
   );
+
+  // Courier Visual Identity & Vehicle State
+  const isCourierProfile =
+    currentUser.role === 'entregador' || currentUser.role === 'motorista';
+  const [avatarUrlInput, setAvatarUrlInput] = useState(
+    currentUser.avatarUrl || ''
+  );
+  const [isCompressingAvatar, setIsCompressingAvatar] = useState(false);
+  const [vehicleTypeInput, setVehicleTypeInput] = useState<VehicleType>(
+    currentUser.vehicleType || 'Moto'
+  );
+  const [propulsionInput, setPropulsionInput] = useState<PropulsionType>(
+    currentUser.propulsion || 'Combustão'
+  );
+  const [vehicleModelInput, setVehicleModelInput] = useState(
+    currentUser.vehicleModel || ''
+  );
+  const [vehicleColorInput, setVehicleColorInput] = useState(
+    currentUser.vehicleColor || ''
+  );
+  const [plateInput, setPlateInput] = useState(currentUser.plate || '');
+  const [isSavingVehicle, setIsSavingVehicle] = useState(false);
+  const [vehicleMsg, setVehicleMsg] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
 
   // Pix Key State (Entregador / Motorista / Admin)
   const canUsePixKey =
@@ -200,6 +246,94 @@ export function MyAccountModal({
       });
     } finally {
       setIsSavingPix(false);
+    }
+  };
+
+  const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setVehicleMsg(null);
+    setIsCompressingAvatar(true);
+    try {
+      const compressed = await compressImageToJpeg(file, 280, 0.72);
+      setAvatarUrlInput(compressed);
+    } catch (err) {
+      setVehicleMsg({
+        type: 'err',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao processar foto do entregador.',
+      });
+    } finally {
+      setIsCompressingAvatar(false);
+      e.target.value = '';
+    }
+  };
+
+  const handleVehicleCategoryChange = (nextVehicle: VehicleType) => {
+    setVehicleTypeInput(nextVehicle);
+    const allowed = getPropulsionOptionsForVehicle(nextVehicle);
+    if (!allowed.includes(propulsionInput)) {
+      setPropulsionInput(allowed[0]);
+    }
+    if (nextVehicle === 'Bike') {
+      setPlateInput('');
+    }
+  };
+
+  const handleSaveCourierIdentity = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setVehicleMsg(null);
+
+    if (!vehicleModelInput.trim() || !vehicleColorInput.trim()) {
+      setVehicleMsg({
+        type: 'err',
+        text: 'Informe o modelo e a cor do veículo (ex.: Honda CG 160 / Preta).',
+      });
+      return;
+    }
+
+    if (vehicleTypeInput !== 'Bike') {
+      if (!plateInput.trim() || !isValidBrazilianPlate(plateInput)) {
+        setVehicleMsg({
+          type: 'err',
+          text: 'Informe uma placa válida em letras maiúsculas (ex.: ABC1D23 ou ABC-1234).',
+        });
+        return;
+      }
+    }
+
+    setIsSavingVehicle(true);
+    try {
+      const updated = await updateCourierIdentityInSupabase({
+        profileId: currentUser.id,
+        avatarUrl: avatarUrlInput || null,
+        vehicleType: vehicleTypeInput,
+        propulsion: propulsionInput,
+        vehicleModel: vehicleModelInput,
+        vehicleColor: vehicleColorInput,
+        plate: vehicleTypeInput === 'Bike' ? '' : plateInput,
+        bikeMaxRadiusKm: currentUser.bikeMaxRadiusKm,
+      });
+      onProfileUpdated(
+        updated,
+        'Identificação visual e dados do veículo atualizados no Supabase.'
+      );
+      setVehicleMsg({
+        type: 'ok',
+        text: 'Foto, modelo/cor e placa salvos com sucesso.',
+      });
+    } catch (err) {
+      setVehicleMsg({
+        type: 'err',
+        text:
+          err instanceof Error
+            ? err.message
+            : 'Erro ao atualizar identificação do veículo.',
+      });
+    } finally {
+      setIsSavingVehicle(false);
     }
   };
 
@@ -662,6 +796,215 @@ export function MyAccountModal({
               </button>
             </div>
           </form>
+
+          {/* Section 1.25: Foto, Modelo/Cor e Placa (Entregador / Motorista) */}
+          {isCourierProfile && (
+            <form
+              onSubmit={handleSaveCourierIdentity}
+              className="rounded-xl border border-emerald-200 bg-white p-5 space-y-4"
+            >
+              <div className="flex items-center justify-between gap-2 border-b border-zinc-100 pb-3">
+                <div className="flex items-center gap-2">
+                  {vehicleTypeInput === 'Bike' ? (
+                    <Bike className="h-4 w-4 text-emerald-600" aria-hidden="true" />
+                  ) : (
+                    <Truck className="h-4 w-4 text-emerald-600" aria-hidden="true" />
+                  )}
+                  <h3 className="font-display text-sm font-semibold text-zinc-900">
+                    Identificação Visual, Veículo e Placa
+                  </h3>
+                </div>
+                <span className="text-[11px] font-medium text-emerald-700">
+                  Exibidos ao cliente na corrida
+                </span>
+              </div>
+
+              <div className="flex flex-col sm:flex-row sm:items-center gap-4">
+                <CourierAvatar
+                  name={currentUser.name}
+                  avatarUrl={avatarUrlInput || undefined}
+                  size="lg"
+                />
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label
+                      htmlFor="acc-courier-avatar"
+                      className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-300 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-100"
+                    >
+                      <Camera
+                        className="h-3.5 w-3.5 text-emerald-600"
+                        aria-hidden="true"
+                      />
+                      <span>
+                        {isCompressingAvatar
+                          ? 'Processando...'
+                          : avatarUrlInput
+                          ? 'Alterar Foto'
+                          : 'Enviar Foto do Entregador'}
+                      </span>
+                      <input
+                        id="acc-courier-avatar"
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => void handleAvatarUpload(e)}
+                        className="sr-only"
+                      />
+                    </label>
+                    {avatarUrlInput && (
+                      <button
+                        type="button"
+                        onClick={() => setAvatarUrlInput('')}
+                        className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Remover</span>
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-zinc-500">
+                    Sua foto ajuda o lojista e o cliente a confirmarem sua identidade
+                    com segurança.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <label
+                    htmlFor="acc-vehicle-type"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Tipo de Veículo
+                  </label>
+                  <select
+                    id="acc-vehicle-type"
+                    value={vehicleTypeInput}
+                    onChange={(e) =>
+                      handleVehicleCategoryChange(e.target.value as VehicleType)
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    {VEHICLE_CATEGORIES.map((vt) => (
+                      <option key={vt} value={vt}>
+                        {vt}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="acc-propulsion"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Propulsão
+                  </label>
+                  <select
+                    id="acc-propulsion"
+                    value={propulsionInput}
+                    onChange={(e) =>
+                      setPropulsionInput(e.target.value as PropulsionType)
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    {getPropulsionOptionsForVehicle(vehicleTypeInput).map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                <div>
+                  <label
+                    htmlFor="acc-vehicle-model"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Modelo do Veículo
+                  </label>
+                  <input
+                    id="acc-vehicle-model"
+                    type="text"
+                    value={vehicleModelInput}
+                    onChange={(e) => setVehicleModelInput(e.target.value)}
+                    placeholder="Ex: Honda CG 160"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="acc-vehicle-color"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Cor do Veículo
+                  </label>
+                  <input
+                    id="acc-vehicle-color"
+                    type="text"
+                    value={vehicleColorInput}
+                    onChange={(e) => setVehicleColorInput(e.target.value)}
+                    placeholder="Ex: Preta"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="acc-vehicle-plate"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Placa{' '}
+                    {vehicleTypeInput === 'Bike' && (
+                      <span className="font-normal text-zinc-400">
+                        (opcional)
+                      </span>
+                    )}
+                  </label>
+                  <input
+                    id="acc-vehicle-plate"
+                    type="text"
+                    maxLength={8}
+                    disabled={vehicleTypeInput === 'Bike'}
+                    value={plateInput}
+                    onChange={(e) =>
+                      setPlateInput(formatPlateInput(e.target.value))
+                    }
+                    placeholder={
+                      vehicleTypeInput === 'Bike' ? 'Bicicleta' : 'ABC1D23'
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-zinc-100"
+                  />
+                </div>
+              </div>
+
+              {vehicleMsg && (
+                <p
+                  className={`rounded-lg border px-3 py-2 text-xs font-medium ${
+                    vehicleMsg.type === 'ok'
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                      : 'border-red-200 bg-red-50 text-red-700'
+                  }`}
+                >
+                  {vehicleMsg.text}
+                </p>
+              )}
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={isSavingVehicle}
+                  className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {isSavingVehicle
+                    ? 'Salvando...'
+                    : 'Salvar Foto e Dados do Veículo'}
+                </button>
+              </div>
+            </form>
+          )}
 
           {/* Section 1.5: Chave Pix (Entregador / Motorista / Admin) */}
           {canUsePixKey && (

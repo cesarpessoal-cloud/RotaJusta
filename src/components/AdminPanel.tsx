@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Ban,
+  Camera,
   Check,
   CheckCircle2,
   Copy,
@@ -41,6 +42,12 @@ import {
   PIX_KEY_TYPES,
 } from '../utils/pix';
 import {
+  formatPlateInput,
+  formatVehicleModelAndColor,
+  isValidBrazilianPlate,
+} from '../utils/courierIdentity';
+import { compressImageToJpeg } from '../utils/imageCompression';
+import {
   formatCnpjMask,
   formatCpfMask,
   formatCpfOrCnpj,
@@ -62,6 +69,7 @@ import {
   getPropulsionOptionsForVehicle,
   VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
+import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
 import {
   ApprovalStatusBadge,
   OrderStatusBadge,
@@ -165,6 +173,11 @@ export function AdminPanel({
     useState<PropulsionType>('Elétrico');
   const [editBikeRadiusKm, setEditBikeRadiusKm] = useState<number | null>(3);
   const [editHasEar, setEditHasEar] = useState(false);
+  const [editAvatarUrl, setEditAvatarUrl] = useState('');
+  const [editVehicleModel, setEditVehicleModel] = useState('');
+  const [editVehicleColor, setEditVehicleColor] = useState('');
+  const [editPlate, setEditPlate] = useState('');
+  const [isCompressingEditAvatar, setIsCompressingEditAvatar] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
@@ -454,6 +467,10 @@ export function AdminPanel({
       profile.bikeMaxRadiusKm === undefined ? 3 : profile.bikeMaxRadiusKm
     );
     setEditHasEar(Boolean(profile.hasEar));
+    setEditAvatarUrl(profile.avatarUrl || '');
+    setEditVehicleModel(profile.vehicleModel || '');
+    setEditVehicleColor(profile.vehicleColor || '');
+    setEditPlate(profile.plate || '');
     setEditError(null);
   };
 
@@ -463,8 +480,11 @@ export function AdminPanel({
     if (!allowed.includes(editPropulsion)) {
       setEditPropulsion(allowed[0]);
     }
-    if (nextVehicle === 'Bike' && editBikeRadiusKm === undefined) {
-      setEditBikeRadiusKm(3);
+    if (nextVehicle === 'Bike') {
+      if (editBikeRadiusKm === undefined) {
+        setEditBikeRadiusKm(3);
+      }
+      setEditPlate('');
     }
   };
 
@@ -500,6 +520,17 @@ export function AdminPanel({
       return;
     }
 
+    const isDriverRole = editRole === 'entregador' || editRole === 'motorista';
+    if (
+      isDriverRole &&
+      editVehicleType !== 'Bike' &&
+      editPlate.trim() &&
+      !isValidBrazilianPlate(editPlate)
+    ) {
+      setEditError('Informe uma placa válida (ex.: ABC1D23 ou ABC1234) ou deixe em branco.');
+      return;
+    }
+
     setIsSavingEdit(true);
     try {
       await onEditProfile({
@@ -515,23 +546,20 @@ export function AdminPanel({
         approvalStatus: editStatus,
         accessPin: editAccessPin.trim() || undefined,
         pixKey: editPixKey.trim(),
-        vehicleType:
-          editRole === 'entregador' || editRole === 'motorista'
-            ? editVehicleType
-            : null,
-        propulsion:
-          editRole === 'entregador' || editRole === 'motorista'
-            ? editPropulsion
-            : null,
+        vehicleType: isDriverRole ? editVehicleType : null,
+        propulsion: isDriverRole ? editPropulsion : null,
         bikeMaxRadiusKm:
-          (editRole === 'entregador' || editRole === 'motorista') &&
-          editVehicleType === 'Bike'
+          isDriverRole && editVehicleType === 'Bike'
             ? editBikeRadiusKm
             : null,
-        hasEar:
-          editRole === 'entregador' || editRole === 'motorista'
-            ? editHasEar
-            : false,
+        hasEar: isDriverRole ? editHasEar : false,
+        avatarUrl: isDriverRole ? editAvatarUrl.trim() || null : null,
+        vehicleModel: isDriverRole ? editVehicleModel.trim() || null : null,
+        vehicleColor: isDriverRole ? editVehicleColor.trim() || null : null,
+        plate:
+          isDriverRole && editVehicleType !== 'Bike'
+            ? editPlate.trim().toUpperCase() || null
+            : null,
       });
       setEditingProfile(null);
     } catch (err) {
@@ -1358,7 +1386,14 @@ export function AdminPanel({
                 className="rounded-xl border border-zinc-200 bg-white p-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"
               >
                 <div className="space-y-2.5">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    {isDriver && (
+                      <CourierAvatar
+                        name={profile.name}
+                        avatarUrl={profile.avatarUrl}
+                        size="md"
+                      />
+                    )}
                     <h3 className="font-display text-base font-semibold text-zinc-900">
                       {profile.businessName || profile.name}
                     </h3>
@@ -1479,16 +1514,30 @@ export function AdminPanel({
                         <span className="text-zinc-400">Veículo:</span>{' '}
                         <span className="text-zinc-800">
                           {profile.vehicleType}
-                          {profile.vehicleModel ? ` — ${profile.vehicleModel}` : ''}
+                          {formatVehicleModelAndColor(
+                            profile.vehicleModel,
+                            profile.vehicleColor
+                          )
+                            ? ` — ${formatVehicleModelAndColor(
+                                profile.vehicleModel,
+                                profile.vehicleColor
+                              )}`
+                            : ''}
                         </span>
                       </p>
                     )}
 
-                    {profile.plate && (
-                      <p>
-                        <span className="text-zinc-400">Placa:</span>{' '}
-                        <span className="font-mono text-zinc-800">{profile.plate}</span>
-                      </p>
+                    {isDriver && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-zinc-400">Placa:</span>
+                        {profile.vehicleType === 'Bike' ? (
+                          <span className="text-zinc-800 font-medium">
+                            Bicicleta (não exigida)
+                          </span>
+                        ) : (
+                          <VehiclePlateBadge plate={profile.plate} compact />
+                        )}
+                      </div>
                     )}
 
                     {isDriver && (
@@ -1939,8 +1988,64 @@ export function AdminPanel({
               {(editRole === 'entregador' || editRole === 'motorista') && (
                 <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 space-y-3">
                   <p className="text-xs font-semibold text-zinc-800">
-                    Dados do Veículo e Propulsão
+                    Foto de Segurança, Veículo, Placa e Propulsão
                   </p>
+
+                  <div className="flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white p-3">
+                    <CourierAvatar
+                      name={editName || editingProfile.name}
+                      avatarUrl={editAvatarUrl || undefined}
+                      size="md"
+                    />
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50">
+                        <Camera
+                          className="h-3.5 w-3.5 text-emerald-600"
+                          aria-hidden="true"
+                        />
+                        <span>
+                          {isCompressingEditAvatar
+                            ? 'Processando...'
+                            : editAvatarUrl
+                            ? 'Trocar Foto'
+                            : 'Enviar Foto'}
+                        </span>
+                        <input
+                          type="file"
+                          accept="image/*"
+                          className="sr-only"
+                          disabled={isCompressingEditAvatar}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = '';
+                            if (!file) return;
+                            setIsCompressingEditAvatar(true);
+                            try {
+                              const dataUrl = await compressImageToJpeg(
+                                file,
+                                280,
+                                0.72
+                              );
+                              setEditAvatarUrl(dataUrl);
+                            } finally {
+                              setIsCompressingEditAvatar(false);
+                            }
+                          }}
+                        />
+                      </label>
+                      {editAvatarUrl && (
+                        <button
+                          type="button"
+                          onClick={() => setEditAvatarUrl('')}
+                          className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-2.5 py-1.5 text-xs font-semibold text-red-700 hover:bg-red-50"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Remover</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="block text-xs font-semibold text-zinc-700 mb-1">
@@ -1982,6 +2087,53 @@ export function AdminPanel({
                       </select>
                     </div>
 
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        Modelo do Veículo
+                      </label>
+                      <input
+                        type="text"
+                        value={editVehicleModel}
+                        onChange={(e) => setEditVehicleModel(e.target.value)}
+                        placeholder="Ex: Honda CG 160"
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        Cor do Veículo
+                      </label>
+                      <input
+                        type="text"
+                        value={editVehicleColor}
+                        onChange={(e) => setEditVehicleColor(e.target.value)}
+                        placeholder="Ex: Preta"
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        Placa{' '}
+                        {editVehicleType === 'Bike'
+                          ? '(Não exigida para Bike)'
+                          : '(Mercosul / Antiga)'}
+                      </label>
+                      <input
+                        type="text"
+                        value={editPlate}
+                        disabled={editVehicleType === 'Bike'}
+                        onChange={(e) =>
+                          setEditPlate(formatPlateInput(e.target.value))
+                        }
+                        placeholder={
+                          editVehicleType === 'Bike' ? 'Não exigida' : 'ABC1D23'
+                        }
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs uppercase text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
+                      />
+                    </div>
+
                     {editVehicleType === 'Bike' && (
                       <div>
                         <label className="block text-xs font-semibold text-zinc-700 mb-1">
@@ -2018,7 +2170,7 @@ export function AdminPanel({
                       </div>
                     )}
 
-                    <label className="flex items-center gap-2 text-xs text-zinc-800 pt-2">
+                    <label className="flex items-center gap-2 text-xs text-zinc-800 pt-2 sm:col-span-2">
                       <input
                         type="checkbox"
                         checked={editHasEar}
@@ -2073,16 +2225,26 @@ export function AdminPanel({
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 bg-zinc-50/70">
-              <div className="space-y-0.5">
-                <h2
-                  id="admin-view-user-title"
-                  className="font-display text-base font-bold text-zinc-900"
-                >
-                  {viewingProfile.businessName || viewingProfile.name}
-                </h2>
-                <p className="text-xs text-zinc-500">
-                  {roleLabel(viewingProfile)}
-                </p>
+              <div className="flex items-center gap-3">
+                {(viewingProfile.role === 'entregador' ||
+                  viewingProfile.role === 'motorista') && (
+                  <CourierAvatar
+                    name={viewingProfile.name}
+                    avatarUrl={viewingProfile.avatarUrl}
+                    size="md"
+                  />
+                )}
+                <div className="space-y-0.5">
+                  <h2
+                    id="admin-view-user-title"
+                    className="font-display text-base font-bold text-zinc-900"
+                  >
+                    {viewingProfile.businessName || viewingProfile.name}
+                  </h2>
+                  <p className="text-xs text-zinc-500">
+                    {roleLabel(viewingProfile)}
+                  </p>
+                </div>
               </div>
               <button
                 type="button"
@@ -2174,11 +2336,20 @@ export function AdminPanel({
                   </div>
                 )}
                 {viewingProfile.vehicleType && (
-                  <div className="sm:col-span-2">
-                    <p className="text-zinc-400">Veículo &amp; Propulsão</p>
-                    <p className="text-zinc-900 mt-0.5">
+                  <div className="sm:col-span-2 space-y-1.5">
+                    <p className="text-zinc-400">Veículo, Placa &amp; Propulsão</p>
+                    <p className="text-zinc-900">
                       {viewingProfile.vehicleType} ·{' '}
                       {viewingProfile.propulsion || 'Padrão'}
+                      {formatVehicleModelAndColor(
+                        viewingProfile.vehicleModel,
+                        viewingProfile.vehicleColor
+                      )
+                        ? ` · ${formatVehicleModelAndColor(
+                            viewingProfile.vehicleModel,
+                            viewingProfile.vehicleColor
+                          )}`
+                        : ''}
                       {viewingProfile.vehicleType === 'Bike'
                         ? ` · Raio: ${
                             viewingProfile.bikeMaxRadiusKm === null
@@ -2187,6 +2358,11 @@ export function AdminPanel({
                           }`
                         : ''}
                     </p>
+                    {viewingProfile.vehicleType !== 'Bike' && (
+                      <div>
+                        <VehiclePlateBadge plate={viewingProfile.plate} compact />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

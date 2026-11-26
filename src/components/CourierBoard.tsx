@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  BellRing,
   Bike,
   CalendarClock,
   Camera,
@@ -11,6 +12,7 @@ import {
   Hash,
   Map as MapIcon,
   MapPin,
+  MessageCircle,
   Navigation,
   Package,
   QrCode,
@@ -23,8 +25,25 @@ import {
   Wallet,
   Zap,
 } from 'lucide-react';
-import { buildGoogleMapsStopUrl } from '../constants/portoAlegre';
-import { Order, PixKeyType, Profile, Rating } from '../types';
+import {
+  buildGoogleMapsStopUrl,
+  buildWazeStopUrl,
+} from '../constants/portoAlegre';
+import {
+  CourierQuickNoticeType,
+  Order,
+  PixKeyType,
+  Profile,
+  PropulsionType,
+  Rating,
+  VehicleType,
+} from '../types';
+import { updateCourierIdentityInSupabase } from '../lib/supabaseService';
+import {
+  formatPlateInput,
+  formatVehicleModelAndColor,
+  isValidBrazilianPlate,
+} from '../utils/courierIdentity';
 import { formatCpfOrCnpj } from '../utils/documentValidation';
 import { compressImageToJpeg } from '../utils/imageCompression';
 import {
@@ -40,13 +59,22 @@ import {
   isZeroFeePropulsion,
 } from '../utils/pricing';
 import { formatPickupCode } from '../utils/pickupCode';
+import {
+  buildQuickNoticeWhatsAppMessage,
+  buildWhatsAppUrl,
+  extractBrPhoneDigits,
+  QUICK_NOTICE_META,
+} from '../utils/quickNotice';
 import { formatPickupScheduleLabel } from '../utils/schedule';
 import {
   BIKE_RADIUS_OPTIONS,
   getEffectiveBikeRadiusKm,
+  getPropulsionOptionsForVehicle,
   getVehicleCompatibilityLabel,
   sortCompatibleOrdersForVehicle,
+  VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
+import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
 import {
   ApprovalStatusBadge,
   EvBadge,
@@ -69,6 +97,11 @@ interface CourierBoardProps {
   activeCourierId: string;
   onSelectCourier: (id: string) => void;
   onAcceptOrder: (orderId: string, courier: Profile) => Promise<void>;
+  onSendQuickNotice?: (
+    orderId: string,
+    noticeType: CourierQuickNoticeType,
+    stopSequence?: number
+  ) => Promise<void>;
   onConfirmStop: (
     orderId: string,
     stopId: string,
@@ -81,6 +114,7 @@ interface CourierBoardProps {
   onTestSoundAlert: () => Promise<void>;
   onUpdateCourierPixKey: (courierId: string, pixKey: string) => Promise<void>;
   onConfirmCourierPixReceipt: (orderId: string) => Promise<void>;
+  onCourierProfileUpdated?: (updated: Profile) => void;
   onSubmitRating: (params: {
     deliveryId: string;
     fromProfileId: string;
@@ -100,6 +134,7 @@ export function CourierBoard({
   activeCourierId,
   onSelectCourier,
   onAcceptOrder,
+  onSendQuickNotice,
   onConfirmStop,
   onCompleteOrder,
   onUpdateBikeRadius,
@@ -107,6 +142,7 @@ export function CourierBoard({
   onTestSoundAlert,
   onUpdateCourierPixKey,
   onConfirmCourierPixReceipt,
+  onCourierProfileUpdated,
   onSubmitRating,
 }: CourierBoardProps) {
   const activeCourier = useMemo(() => {
@@ -125,6 +161,10 @@ export function CourierBoard({
   const [compressingStopId, setCompressingStopId] = useState<string | null>(null);
   const [stopErrors, setStopErrors] = useState<Record<string, string>>({});
   const [previewMapOrderId, setPreviewMapOrderId] = useState<string | null>(null);
+  const [gpsStageByOrder, setGpsStageByOrder] = useState<
+    Record<string, 'pickup' | 'delivery'>
+  >({});
+  const [sendingNoticeKey, setSendingNoticeKey] = useState<string | null>(null);
   const [isTogglingOnline, setIsTogglingOnline] = useState(false);
   const [isTestingSound, setIsTestingSound] = useState(false);
   const [acceptingOrderId, setAcceptingOrderId] = useState<string | null>(null);
@@ -145,11 +185,60 @@ export function CourierBoard({
     string | null
   >(null);
 
+  // Identidade Visual & Veículo (Tab 3)
+  const [avatarDraft, setAvatarDraft] = useState<string>(
+    activeCourier?.avatarUrl || ''
+  );
+  const [vehicleTypeDraft, setVehicleTypeDraft] = useState<VehicleType>(
+    activeCourier?.vehicleType || 'Moto'
+  );
+  const [propulsionDraft, setPropulsionDraft] = useState<PropulsionType>(
+    activeCourier?.propulsion || 'Combustão'
+  );
+  const [vehicleModelDraft, setVehicleModelDraft] = useState<string>(
+    activeCourier?.vehicleModel || ''
+  );
+  const [vehicleColorDraft, setVehicleColorDraft] = useState<string>(
+    activeCourier?.vehicleColor || ''
+  );
+  const [plateDraft, setPlateDraft] = useState<string>(
+    activeCourier?.plate || ''
+  );
+  const [isCompressingAvatar, setIsCompressingAvatar] = useState(false);
+  const [isSavingIdentity, setIsSavingIdentity] = useState(false);
+  const [identityFeedback, setIdentityFeedback] = useState<string | null>(null);
+  const [identityError, setIdentityError] = useState<string | null>(null);
+
   useEffect(() => {
     setPixTypeDraft(inferPixKeyType(activeCourier?.pixKey));
     setPixKeyDraft(activeCourier?.pixKey || '');
     setPixFeedback(null);
   }, [activeCourier?.id, activeCourier?.pixKey]);
+
+  useEffect(() => {
+    setAvatarDraft(activeCourier?.avatarUrl || '');
+    const vType: VehicleType = activeCourier?.vehicleType || 'Moto';
+    setVehicleTypeDraft(vType);
+    const allowed = getPropulsionOptionsForVehicle(vType);
+    setPropulsionDraft(
+      activeCourier?.propulsion && allowed.includes(activeCourier.propulsion)
+        ? activeCourier.propulsion
+        : allowed[0]
+    );
+    setVehicleModelDraft(activeCourier?.vehicleModel || '');
+    setVehicleColorDraft(activeCourier?.vehicleColor || '');
+    setPlateDraft(activeCourier?.plate || '');
+    setIdentityFeedback(null);
+    setIdentityError(null);
+  }, [
+    activeCourier?.id,
+    activeCourier?.avatarUrl,
+    activeCourier?.vehicleType,
+    activeCourier?.propulsion,
+    activeCourier?.vehicleModel,
+    activeCourier?.vehicleColor,
+    activeCourier?.plate,
+  ]);
 
   const allWaitingOrders = waitingOrders;
 
@@ -588,6 +677,87 @@ export function CourierBoard({
                   const scheduleLabel = formatPickupScheduleLabel(
                     order.pickupSchedule
                   );
+                  const nextPendingStop =
+                    order.stops.find((s) => !s.delivered) || order.stops[0];
+                  const gpsStage: 'pickup' | 'delivery' =
+                    gpsStageByOrder[order.id] ??
+                    (deliveredCount > 0 ? 'delivery' : 'pickup');
+                  const gpsTarget =
+                    gpsStage === 'pickup' || !nextPendingStop
+                      ? {
+                          label: 'Ponto de Coleta',
+                          address: order.pickupAddress,
+                          neighborhood: order.pickupNeighborhood,
+                          lat: order.pickupLat,
+                          lng: order.pickupLng,
+                        }
+                      : {
+                          label:
+                            order.stops.length > 1
+                              ? `Entrega #${nextPendingStop.sequence}`
+                              : 'Ponto de Entrega',
+                          address: nextPendingStop.address,
+                          neighborhood: nextPendingStop.neighborhood,
+                          lat: nextPendingStop.lat,
+                          lng: nextPendingStop.lng,
+                        };
+                  const googleMapsNavUrl = buildGoogleMapsStopUrl(gpsTarget);
+                  const wazeNavUrl = buildWazeStopUrl(gpsTarget);
+
+                  const pickupContactPhone =
+                    order.merchantPhone ||
+                    (extractBrPhoneDigits(order.pickupAddress)
+                      ? order.pickupAddress
+                      : null);
+                  const deliveryContactPhone =
+                    (nextPendingStop &&
+                    extractBrPhoneDigits(nextPendingStop.recipientNote)
+                      ? nextPendingStop.recipientNote
+                      : nextPendingStop &&
+                        extractBrPhoneDigits(nextPendingStop.expectedRecipient)
+                      ? nextPendingStop.expectedRecipient
+                      : null) ||
+                    (order.flowDirection === 'receber'
+                      ? order.merchantPhone
+                      : order.merchantPhone);
+
+                  const activeNotice = order.courierQuickNotice;
+                  const whatsappMessage = buildQuickNoticeWhatsAppMessage({
+                    stage: gpsStage,
+                    orderCode: order.code,
+                    activeNoticeType: activeNotice?.type,
+                    courierName: activeCourier.name,
+                    vehicleType: activeCourier.vehicleType,
+                    vehicleModel: activeCourier.vehicleModel,
+                    vehicleColor: activeCourier.vehicleColor,
+                    vehiclePlate: activeCourier.plate,
+                  });
+                  const whatsappHref = buildWhatsAppUrl({
+                    phone:
+                      gpsStage === 'pickup'
+                        ? pickupContactPhone
+                        : deliveryContactPhone,
+                    message: whatsappMessage,
+                  });
+
+                  const triggerQuickNotice = async (
+                    noticeType: CourierQuickNoticeType
+                  ) => {
+                    if (!onSendQuickNotice) return;
+                    const key = `${order.id}:${noticeType}`;
+                    setSendingNoticeKey(key);
+                    try {
+                      await onSendQuickNotice(
+                        order.id,
+                        noticeType,
+                        gpsStage === 'delivery'
+                          ? nextPendingStop?.sequence
+                          : undefined
+                      );
+                    } finally {
+                      setSendingNoticeKey(null);
+                    }
+                  };
 
                   return (
                     <div
@@ -708,9 +878,224 @@ export function CourierBoard({
                         )}
                       </div>
 
+                      {/* Aviso Rápido com 1 Toque + WhatsApp Direto */}
+                      <div className="rounded-2xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-600 text-white shrink-0">
+                              <BellRing className="h-4 w-4" aria-hidden="true" />
+                            </span>
+                            <div>
+                              <h4 className="text-xs sm:text-sm font-bold text-zinc-900">
+                                Aviso Rápido com 1 Toque ao Cliente ({order.code})
+                              </h4>
+                              <p className="text-[11px] text-zinc-600">
+                                Atualiza o painel do cliente em tempo real para
+                                evitar espera na rua.
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-[11px] font-semibold self-start sm:self-center">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setGpsStageByOrder((prev) => ({
+                                  ...prev,
+                                  [order.id]: 'pickup',
+                                }))
+                              }
+                              className={`rounded-md px-2.5 py-1 transition-colors ${
+                                gpsStage === 'pickup'
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'text-zinc-600 hover:text-zinc-900'
+                              }`}
+                            >
+                              Etapa: Coleta
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setGpsStageByOrder((prev) => ({
+                                  ...prev,
+                                  [order.id]: 'delivery',
+                                }))
+                              }
+                              className={`rounded-md px-2.5 py-1 transition-colors ${
+                                gpsStage === 'delivery'
+                                  ? 'bg-orange-600 text-white'
+                                  : 'text-zinc-600 hover:text-zinc-900'
+                              }`}
+                            >
+                              Etapa: Entrega
+                            </button>
+                          </div>
+                        </div>
+
+                        {gpsStage === 'pickup' ? (
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                            <button
+                              type="button"
+                              disabled={
+                                sendingNoticeKey ===
+                                `${order.id}:chegando_coleta`
+                              }
+                              onClick={() =>
+                                void triggerQuickNotice('chegando_coleta')
+                              }
+                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
+                                activeNotice?.type === 'chegando_coleta'
+                                  ? 'border-blue-700 bg-blue-700 text-white shadow-xs'
+                                  : 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700'
+                              }`}
+                            >
+                              <BellRing
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {sendingNoticeKey ===
+                                `${order.id}:chegando_coleta`
+                                  ? 'Enviando...'
+                                  : QUICK_NOTICE_META.chegando_coleta
+                                      .courierButtonLabel}
+                              </span>
+                            </button>
+
+                            <button
+                              type="button"
+                              disabled={
+                                sendingNoticeKey ===
+                                `${order.id}:chegou_coleta`
+                              }
+                              onClick={() =>
+                                void triggerQuickNotice('chegou_coleta')
+                              }
+                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
+                                activeNotice?.type === 'chegou_coleta'
+                                  ? 'border-amber-600 bg-amber-600 text-white shadow-xs'
+                                  : 'border-amber-500 bg-amber-500 text-zinc-950 hover:bg-amber-600 hover:text-white'
+                              }`}
+                            >
+                              <MapPin
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {sendingNoticeKey ===
+                                `${order.id}:chegou_coleta`
+                                  ? 'Enviando...'
+                                  : QUICK_NOTICE_META.chegou_coleta
+                                      .courierButtonLabel}
+                              </span>
+                            </button>
+
+                            <a
+                              href={whatsappHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-3 py-2.5 text-xs font-bold text-white transition-colors hover:bg-green-700 shadow-xs"
+                            >
+                              <MessageCircle
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>Enviar no WhatsApp</span>
+                              <ExternalLink
+                                className="h-3.5 w-3.5 shrink-0 opacity-85"
+                                aria-hidden="true"
+                              />
+                            </a>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                            <button
+                              type="button"
+                              disabled={
+                                sendingNoticeKey ===
+                                `${order.id}:chegando_entrega`
+                              }
+                              onClick={() =>
+                                void triggerQuickNotice('chegando_entrega')
+                              }
+                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3.5 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
+                                activeNotice?.type === 'chegando_entrega'
+                                  ? 'border-emerald-700 bg-emerald-700 text-white shadow-xs'
+                                  : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'
+                              }`}
+                            >
+                              <BellRing
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {sendingNoticeKey ===
+                                `${order.id}:chegando_entrega`
+                                  ? 'Enviando...'
+                                  : QUICK_NOTICE_META.chegando_entrega
+                                      .courierButtonLabel}
+                              </span>
+                            </button>
+
+                            <a
+                              href={whatsappHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-green-700 shadow-xs"
+                            >
+                              <MessageCircle
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>Enviar no WhatsApp</span>
+                              <ExternalLink
+                                className="h-3.5 w-3.5 shrink-0 opacity-85"
+                                aria-hidden="true"
+                              />
+                            </a>
+                          </div>
+                        )}
+
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-[11px]">
+                          {activeNotice ? (
+                            <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-900">
+                              <CheckCircle2
+                                className="h-3.5 w-3.5 text-emerald-600 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                Aviso ativo para o cliente: &ldquo;
+                                {activeNotice.message}&rdquo; ·{' '}
+                                {formatDateTimeBR(activeNotice.updatedAt)}
+                              </span>
+                            </span>
+                          ) : (
+                            <span className="text-zinc-500">
+                              Toque em um aviso acima para notificar o cliente
+                              instantaneamente no app ou via WhatsApp.
+                            </span>
+                          )}
+
+                          {gpsStage === 'pickup' && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setGpsStageByOrder((prev) => ({
+                                  ...prev,
+                                  [order.id]: 'delivery',
+                                }))
+                              }
+                              className="font-bold text-orange-700 hover:text-orange-800 underline underline-offset-2 self-start sm:self-center shrink-0"
+                            >
+                              Já retirei o pacote → Mudar para Entrega
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
                       {/* Map + Sequential Stops List */}
                       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
-                        <div className="lg:col-span-5">
+                        <div className="lg:col-span-5 space-y-3">
                           <PortoAlegreMap
                             pickup={{
                               label: order.merchantName,
@@ -720,9 +1105,103 @@ export function CourierBoard({
                               lng: order.pickupLng,
                             }}
                             stops={order.stops}
-                            heightClass="h-[260px] lg:h-[360px]"
+                            orderCode={order.code}
+                            heightClass="h-[260px] lg:h-[340px]"
                             title={`Rota ${order.code} · Porto Alegre`}
                           />
+
+                          {/* Native GPS App Navigation Shortcuts */}
+                          <div className="rounded-xl border border-zinc-200 bg-zinc-50/90 p-3.5 space-y-3">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="inline-flex items-center gap-1.5 text-xs font-bold text-zinc-900">
+                                <Navigation
+                                  className="h-3.5 w-3.5 text-emerald-600"
+                                  aria-hidden="true"
+                                />
+                                Navegação GPS
+                              </span>
+                              <div className="inline-flex rounded-lg border border-zinc-200 bg-white p-0.5 text-[11px] font-semibold">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setGpsStageByOrder((prev) => ({
+                                      ...prev,
+                                      [order.id]: 'pickup',
+                                    }))
+                                  }
+                                  className={`rounded-md px-2.5 py-1 transition-colors ${
+                                    gpsStage === 'pickup'
+                                      ? 'bg-emerald-600 text-white'
+                                      : 'text-zinc-600 hover:text-zinc-900'
+                                  }`}
+                                >
+                                  Ir para Coleta
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    setGpsStageByOrder((prev) => ({
+                                      ...prev,
+                                      [order.id]: 'delivery',
+                                    }))
+                                  }
+                                  className={`rounded-md px-2.5 py-1 transition-colors ${
+                                    gpsStage === 'delivery'
+                                      ? 'bg-orange-600 text-white'
+                                      : 'text-zinc-600 hover:text-zinc-900'
+                                  }`}
+                                >
+                                  {order.stops.length > 1 && nextPendingStop
+                                    ? `Ir para Entrega #${nextPendingStop.sequence}`
+                                    : 'Ir para Entrega'}
+                                </button>
+                              </div>
+                            </div>
+
+                            <p className="text-xs text-zinc-600 leading-snug">
+                              <span className="font-semibold text-zinc-800">
+                                {gpsTarget.label}:
+                              </span>{' '}
+                              {gpsTarget.address} — Bairro{' '}
+                              {gpsTarget.neighborhood}
+                            </p>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                              <a
+                                href={googleMapsNavUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-emerald-600 bg-emerald-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-emerald-700 shadow-xs"
+                              >
+                                <MapPin
+                                  className="h-4 w-4 shrink-0"
+                                  aria-hidden="true"
+                                />
+                                <span>Abrir no Google Maps</span>
+                                <ExternalLink
+                                  className="h-3.5 w-3.5 shrink-0 opacity-85"
+                                  aria-hidden="true"
+                                />
+                              </a>
+
+                              <a
+                                href={wazeNavUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-sky-600 bg-sky-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-sky-700 shadow-xs"
+                              >
+                                <Navigation
+                                  className="h-4 w-4 shrink-0"
+                                  aria-hidden="true"
+                                />
+                                <span>Abrir no Waze</span>
+                                <ExternalLink
+                                  className="h-3.5 w-3.5 shrink-0 opacity-85"
+                                  aria-hidden="true"
+                                />
+                              </a>
+                            </div>
+                          </div>
                         </div>
 
                         <div className="lg:col-span-7 space-y-3">
@@ -1206,7 +1685,8 @@ export function CourierBoard({
                               lng: order.pickupLng,
                             }}
                             stops={order.stops}
-                            heightClass="h-[220px]"
+                            orderCode={order.code}
+                            heightClass="h-[230px]"
                             title={`Prévia ${order.code}`}
                           />
                         )}
@@ -1678,14 +2158,12 @@ export function CourierBoard({
 
           <section className="rounded-2xl border border-zinc-200 bg-white p-5 sm:p-6 space-y-5">
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-100 pb-4">
-              <div className="flex items-start gap-3">
-                <span className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-700 shrink-0">
-                  {isBike ? (
-                    <Bike className="h-5 w-5" aria-hidden="true" />
-                  ) : (
-                    <User className="h-5 w-5" aria-hidden="true" />
-                  )}
-                </span>
+              <div className="flex items-start gap-3.5">
+                <CourierAvatar
+                  name={activeCourier.name}
+                  avatarUrl={activeCourier.avatarUrl}
+                  size="lg"
+                />
                 <div className="space-y-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <h2 className="font-display text-lg font-bold text-zinc-900">
@@ -1699,6 +2177,16 @@ export function CourierBoard({
                   <div className="flex flex-wrap items-center gap-2">
                     <ApprovalStatusBadge status={activeCourier.approvalStatus} />
                     <PropulsionTag propulsion={activeCourier.propulsion} />
+                    {activeCourier.vehicleType === 'Bike' ? (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                        <Bike className="h-3 w-3" aria-hidden="true" />
+                        <span>Bicicleta</span>
+                      </span>
+                    ) : (
+                      activeCourier.plate && (
+                        <VehiclePlateBadge plate={activeCourier.plate} compact />
+                      )
+                    )}
                   </div>
                 </div>
               </div>
@@ -1735,14 +2223,28 @@ export function CourierBoard({
                 </p>
               </div>
 
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1">
-                <p className="text-zinc-500">Categoria do Veículo</p>
+              <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1.5">
+                <p className="text-zinc-500">Veículo & Identificação</p>
                 <p className="text-sm font-semibold text-zinc-900">
                   {activeCourier.vehicleType || 'Não definido'}
+                  {formatVehicleModelAndColor(
+                    activeCourier.vehicleModel,
+                    activeCourier.vehicleColor
+                  )
+                    ? ` · ${formatVehicleModelAndColor(
+                        activeCourier.vehicleModel,
+                        activeCourier.vehicleColor
+                      )}`
+                    : ''}
                 </p>
-                <p className="text-[11px] text-zinc-500">
-                  Compatível: {getVehicleCompatibilityLabel(activeCourier.vehicleType)}
-                </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  {activeCourier.vehicleType !== 'Bike' && (
+                    <VehiclePlateBadge plate={activeCourier.plate} compact />
+                  )}
+                  <span className="text-[11px] text-zinc-500">
+                    Compatível: {getVehicleCompatibilityLabel(activeCourier.vehicleType)}
+                  </span>
+                </div>
               </div>
 
               <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1">
@@ -1765,6 +2267,259 @@ export function CourierBoard({
                 </p>
               </div>
             </div>
+
+            {/* Editor de Identificação Visual & Veículo (Foto, Modelo/Cor e Placa) */}
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setIdentityError(null);
+                setIdentityFeedback(null);
+
+                if (!vehicleModelDraft.trim() || !vehicleColorDraft.trim()) {
+                  setIdentityError(
+                    'Informe o modelo e a cor do veículo para exibição segura aos clientes.'
+                  );
+                  return;
+                }
+                if (
+                  vehicleTypeDraft !== 'Bike' &&
+                  !isValidBrazilianPlate(plateDraft)
+                ) {
+                  setIdentityError(
+                    'Informe uma placa válida (ex.: ABC1D23 ou ABC1234).'
+                  );
+                  return;
+                }
+
+                setIsSavingIdentity(true);
+                try {
+                  const updated = await updateCourierIdentityInSupabase({
+                    profileId: activeCourier.id,
+                    avatarUrl: avatarDraft.trim() || null,
+                    vehicleType: vehicleTypeDraft,
+                    propulsion: propulsionDraft,
+                    vehicleModel: vehicleModelDraft.trim(),
+                    vehicleColor: vehicleColorDraft.trim(),
+                    plate:
+                      vehicleTypeDraft === 'Bike'
+                        ? plateDraft.trim().toUpperCase() || undefined
+                        : plateDraft.trim().toUpperCase(),
+                  });
+                  onCourierProfileUpdated?.(updated);
+                  setIdentityFeedback(
+                    'Foto, veículo e placa salvos! Os clientes já verão sua identificação nas corridas.'
+                  );
+                } catch (err) {
+                  setIdentityError(
+                    err instanceof Error
+                      ? err.message
+                      : 'Erro ao atualizar identificação do entregador.'
+                  );
+                } finally {
+                  setIsSavingIdentity(false);
+                }
+              }}
+              className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4 space-y-4"
+            >
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-bold text-zinc-900">
+                    Foto de Segurança, Veículo e Placa
+                  </h3>
+                  <p className="text-xs text-zinc-500">
+                    Exibido para o cliente na coleta e na entrega para evitar fraudes.
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <CourierAvatar
+                  name={activeCourier.name}
+                  avatarUrl={avatarDraft || undefined}
+                  size="lg"
+                />
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50">
+                    <Camera className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                    <span>
+                      {isCompressingAvatar
+                        ? 'Processando...'
+                        : avatarDraft
+                        ? 'Trocar Foto'
+                        : 'Enviar Foto'}
+                    </span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      capture="user"
+                      className="sr-only"
+                      disabled={isCompressingAvatar}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        setIdentityError(null);
+                        setIsCompressingAvatar(true);
+                        try {
+                          const dataUrl = await compressImageToJpeg(file, 280, 0.72);
+                          setAvatarDraft(dataUrl);
+                        } catch {
+                          setIdentityError('Não foi possível processar esta foto.');
+                        } finally {
+                          setIsCompressingAvatar(false);
+                        }
+                      }}
+                    />
+                  </label>
+                  {avatarDraft && (
+                    <button
+                      type="button"
+                      onClick={() => setAvatarDraft('')}
+                      className="inline-flex items-center gap-1 rounded-lg border border-red-200 bg-white px-3 py-2 text-xs font-semibold text-red-700 hover:bg-red-50"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Remover Foto</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                <div>
+                  <label
+                    htmlFor="courier-tab-vehicle-type"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Categoria
+                  </label>
+                  <select
+                    id="courier-tab-vehicle-type"
+                    value={vehicleTypeDraft}
+                    onChange={(e) => {
+                      const next = e.target.value as VehicleType;
+                      setVehicleTypeDraft(next);
+                      const allowed = getPropulsionOptionsForVehicle(next);
+                      if (!allowed.includes(propulsionDraft)) {
+                        setPropulsionDraft(allowed[0]);
+                      }
+                      if (next === 'Bike') {
+                        setPlateDraft('');
+                      }
+                    }}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    {VEHICLE_CATEGORIES.map((v) => (
+                      <option key={v} value={v}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="courier-tab-propulsion"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Propulsão
+                  </label>
+                  <select
+                    id="courier-tab-propulsion"
+                    value={propulsionDraft}
+                    onChange={(e) =>
+                      setPropulsionDraft(e.target.value as PropulsionType)
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    {getPropulsionOptionsForVehicle(vehicleTypeDraft).map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="courier-tab-plate"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Placa {vehicleTypeDraft === 'Bike' ? '(Opcional)' : '*'}
+                  </label>
+                  <input
+                    id="courier-tab-plate"
+                    type="text"
+                    value={plateDraft}
+                    disabled={vehicleTypeDraft === 'Bike'}
+                    onChange={(e) =>
+                      setPlateDraft(formatPlateInput(e.target.value))
+                    }
+                    placeholder={
+                      vehicleTypeDraft === 'Bike' ? 'Não exigida' : 'ABC1D23'
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs uppercase text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
+                  />
+                </div>
+
+                <div className="sm:col-span-2 lg:col-span-2">
+                  <label
+                    htmlFor="courier-tab-model"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Modelo do Veículo *
+                  </label>
+                  <input
+                    id="courier-tab-model"
+                    type="text"
+                    value={vehicleModelDraft}
+                    onChange={(e) => setVehicleModelDraft(e.target.value)}
+                    placeholder="Ex: Honda CG 160 / Caloi Aro 29 / Fiat Fiorino"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label
+                    htmlFor="courier-tab-color"
+                    className="block text-xs font-semibold text-zinc-700 mb-1"
+                  >
+                    Cor *
+                  </label>
+                  <input
+                    id="courier-tab-color"
+                    type="text"
+                    value={vehicleColorDraft}
+                    onChange={(e) => setVehicleColorDraft(e.target.value)}
+                    placeholder="Ex: Preta"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {identityError && (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                  {identityError}
+                </p>
+              )}
+
+              {identityFeedback && (
+                <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-800">
+                  {identityFeedback}
+                </p>
+              )}
+
+              <div className="flex justify-end">
+                <button
+                  type="submit"
+                  disabled={isSavingIdentity || isCompressingAvatar}
+                  className="inline-flex min-h-[40px] items-center justify-center rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {isSavingIdentity
+                    ? 'Salvando...'
+                    : 'Salvar Foto, Veículo e Placa'}
+                </button>
+              </div>
+            </form>
 
             {/* Bike Max Radius Setting */}
             {isBike && (

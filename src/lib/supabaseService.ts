@@ -2,6 +2,8 @@ import { resolvePortoAlegreCoordinates } from '../constants/portoAlegre';
 import {
   ApprovalStatus,
   CargoSize,
+  CourierQuickNotice,
+  CourierQuickNoticeType,
   DeliveryStop,
   Order,
   OrderFlowDirection,
@@ -22,6 +24,11 @@ import { formatCpfOrCnpj, onlyDigits } from '../utils/documentValidation';
 import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
 import { formatPickupCode } from '../utils/pickupCode';
 import { calculatePricing } from '../utils/pricing';
+import {
+  buildCourierQuickNotice,
+  isCourierQuickNoticeType,
+} from '../utils/quickNotice';
+import { normalizePlateForDisplay } from '../utils/courierIdentity';
 import { verifyTotpCode } from '../utils/totp';
 import { supabase } from './supabase';
 
@@ -40,8 +47,12 @@ interface DbProfileRow {
   document_number?: string | null;
   company_legal_name?: string | null;
   role: UserRole;
+  avatar_url?: string | null;
   vehicle_type: string | null;
   propulsion: string | null;
+  vehicle_model?: string | null;
+  vehicle_color?: string | null;
+  vehicle_plate?: string | null;
   max_radius_km: number | null;
   cnh_ear?: boolean | null;
   status: string;
@@ -82,6 +93,8 @@ interface DbDeliveryRow {
   request_direction?: string | null;
   pickup_scheduled_at?: string | null;
   pickup_deadline_at?: string | null;
+  courier_notice?: string | null;
+  courier_notice_at?: string | null;
   driver_id: string | null;
   driver_name: string | null;
   source_channel: string | null;
@@ -157,6 +170,40 @@ function formatDeliveryCode(id: string): string {
   return formatPickupCode(id);
 }
 
+const COURIER_ID_META_PREFIX = '__RJ_ID__:';
+
+interface CourierIdentityFallbackMeta {
+  a?: string;
+  m?: string;
+  c?: string;
+  p?: string;
+}
+
+function encodeCourierIdentityMeta(
+  meta: CourierIdentityFallbackMeta
+): string | null {
+  const compact: CourierIdentityFallbackMeta = {};
+  if (meta.a) compact.a = meta.a;
+  if (meta.m) compact.m = meta.m;
+  if (meta.c) compact.c = meta.c;
+  if (meta.p) compact.p = meta.p;
+  if (Object.keys(compact).length === 0) return null;
+  return `${COURIER_ID_META_PREFIX}${JSON.stringify(compact)}`;
+}
+
+function decodeCourierIdentityMeta(
+  raw?: string | null
+): CourierIdentityFallbackMeta | null {
+  if (!raw || !raw.startsWith(COURIER_ID_META_PREFIX)) return null;
+  try {
+    return JSON.parse(
+      raw.slice(COURIER_ID_META_PREFIX.length)
+    ) as CourierIdentityFallbackMeta;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeProfileFromRow(row: DbProfileRow): Profile {
   let vehicleType = (row.vehicle_type || undefined) as VehicleType | undefined;
   let propulsion = (row.propulsion || undefined) as PropulsionType | undefined;
@@ -191,15 +238,26 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
     : '';
   const formattedDoc = formatCpfOrCnpj(docDigits, resolvedPersonType);
 
+  const fallbackMeta = decodeCourierIdentityMeta(row.company_legal_name);
+  const cleanCompanyLegalName = fallbackMeta
+    ? undefined
+    : row.company_legal_name || undefined;
+
+  const resolvedAvatar = row.avatar_url || fallbackMeta?.a || undefined;
+  const resolvedModel = row.vehicle_model || fallbackMeta?.m || undefined;
+  const resolvedColor = row.vehicle_color || fallbackMeta?.c || undefined;
+  const resolvedPlate =
+    normalizePlateForDisplay(row.vehicle_plate || fallbackMeta?.p) || undefined;
+
   return {
     id: row.id,
     role: row.role || 'entregador',
     personType: resolvedPersonType,
     name: row.name,
-    companyLegalName: row.company_legal_name || undefined,
+    companyLegalName: cleanCompanyLegalName,
     businessName:
       resolvedPersonType === 'PJ'
-        ? row.company_legal_name || row.name
+        ? cleanCompanyLegalName || row.name
         : undefined,
     document: formattedDoc,
     documentNumber: docDigits || undefined,
@@ -209,8 +267,12 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
     pixKey: row.pix_key || undefined,
     neighborhood: 'Porto Alegre',
     twoFactorEnabled: Boolean(row.two_factor_enabled),
+    avatarUrl: resolvedAvatar,
     vehicleType,
     propulsion,
+    vehicleModel: resolvedModel,
+    vehicleColor: resolvedColor,
+    plate: resolvedPlate,
     hasEar: Boolean(row.cnh_ear),
     dailyPassInterest: row.role === 'motorista',
     bikeMaxRadiusKm,
@@ -343,12 +405,31 @@ function normalizeOrderFromRows(
     };
   }
 
+  const avisoMatch = rawSource.match(
+    /\[AVISO:([^|\]]+)\|([^|\]]*)(?:\|([^\]]*))?\]/
+  );
+  let extractedQuickNotice: CourierQuickNotice | undefined;
+  if (isCourierQuickNoticeType(row.courier_notice)) {
+    extractedQuickNotice = buildCourierQuickNotice(
+      row.courier_notice,
+      row.courier_notice_at || row.created_at || new Date().toISOString()
+    );
+  } else if (avisoMatch && isCourierQuickNoticeType(avisoMatch[1])) {
+    const parsedStopSeq = avisoMatch[3] ? Number(avisoMatch[3]) : undefined;
+    extractedQuickNotice = buildCourierQuickNotice(
+      avisoMatch[1],
+      avisoMatch[2] || row.created_at || new Date().toISOString(),
+      parsedStopSeq && !Number.isNaN(parsedStopSeq) ? parsedStopSeq : undefined
+    );
+  }
+
   const cleanMerchantName =
     rawSource
       .replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '')
       .replace(/\s*\[UID:[a-zA-Z0-9-]+\]/g, '')
       .replace(/\s*\[DIR:(?:enviar|receber)\]/g, '')
       .replace(/\s*\[AGD:[^\]]*\]/g, '')
+      .replace(/\s*\[AVISO:[^\]]*\]/g, '')
       .trim() || 'Lojista Porto Alegre';
 
   let merchantProfile = extractedMerchantId
@@ -390,6 +471,7 @@ function normalizeOrderFromRows(
     pickupSchedule: extractedSchedule,
     merchantId: merchantProfile?.id || extractedMerchantId || '',
     merchantName: cleanMerchantName,
+    merchantPhone: merchantProfile?.phone || undefined,
     merchantRatingAvg: merchantProfile?.ratingAvg,
     merchantRatingCount: merchantProfile?.ratingCount,
     pickupAddress: parsedPickup.address,
@@ -423,6 +505,11 @@ function normalizeOrderFromRows(
     paymentStatus: resolvedPaymentStatus,
     assignedCourierId: row.driver_id || undefined,
     assignedCourierName: row.driver_name || undefined,
+    assignedCourierAvatarUrl: assignedDriver?.avatarUrl,
+    assignedCourierVehicleType: assignedDriver?.vehicleType,
+    assignedCourierVehicleModel: assignedDriver?.vehicleModel,
+    assignedCourierVehicleColor: assignedDriver?.vehicleColor,
+    assignedCourierPlate: assignedDriver?.plate,
     assignedCourierPixKey: assignedDriver?.pixKey || undefined,
     assignedCourierPropulsion: assignedDriver?.propulsion,
     assignedCourierRatingAvg: assignedDriver?.ratingAvg,
@@ -430,6 +517,8 @@ function normalizeOrderFromRows(
     appliedPlatformFee: orderStatus !== 'Aguardando' ? appliedFee : undefined,
     evBonusApplied,
     netCourierPayout: orderStatus !== 'Aguardando' ? driverPayout : undefined,
+    courierQuickNotice:
+      orderStatus === 'Em Rota' ? extractedQuickNotice : undefined,
     createdAt: row.created_at || new Date().toISOString(),
   };
 }
@@ -462,9 +551,11 @@ async function fetchStopsForDeliveries(
 const BASE_SAFE_PROFILE_COLUMNS =
   'id, name, phone, email, pix_key, person_type, document_number, company_legal_name, role, vehicle_type, propulsion, max_radius_km, cnh_ear, status, two_factor_enabled, rating_avg, rating_count, is_online, created_at';
 
-const EXTENDED_SAFE_PROFILE_COLUMNS = `${BASE_SAFE_PROFILE_COLUMNS}, accepts_marketing`;
+const COURIER_IDENTITY_COLUMNS =
+  'avatar_url, vehicle_model, vehicle_color, vehicle_plate';
 
 let supportsAcceptsMarketingColumn: boolean | null = null;
+let supportsCourierIdentityColumns: boolean | null = null;
 
 function isMissingAcceptsMarketingError(
   err: { code?: string; message?: string } | null
@@ -474,10 +565,34 @@ function isMissingAcceptsMarketingError(
   return msg.includes('accepts_marketing');
 }
 
+function isMissingCourierIdentityColumnError(
+  err: { code?: string; message?: string } | null
+): boolean {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  return (
+    msg.includes('avatar_url') ||
+    msg.includes('vehicle_model') ||
+    msg.includes('vehicle_color') ||
+    msg.includes('vehicle_plate')
+  );
+}
+
+function buildProfileColumns(
+  includeMarketing: boolean,
+  includeIdentity: boolean
+): string {
+  const parts = [BASE_SAFE_PROFILE_COLUMNS];
+  if (includeMarketing) parts.push('accepts_marketing');
+  if (includeIdentity) parts.push(COURIER_IDENTITY_COLUMNS);
+  return parts.join(', ');
+}
+
 async function runProfileQuery<T>(
   runner: (
     cols: string,
-    includeMarketing: boolean
+    includeMarketing: boolean,
+    includeIdentity: boolean
   ) => PromiseLike<{
     data: unknown;
     error: { code?: string; message: string } | null;
@@ -486,26 +601,40 @@ async function runProfileQuery<T>(
   data: T | null;
   error: { code?: string; message: string } | null;
 }> {
-  if (supportsAcceptsMarketingColumn !== false) {
-    const res = await runner(EXTENDED_SAFE_PROFILE_COLUMNS, true);
+  let includeMarketing = supportsAcceptsMarketingColumn !== false;
+  let includeIdentity = supportsCourierIdentityColumns !== false;
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const cols = buildProfileColumns(includeMarketing, includeIdentity);
+    const res = await runner(cols, includeMarketing, includeIdentity);
     if (!res.error) {
-      supportsAcceptsMarketingColumn = true;
+      if (includeMarketing) supportsAcceptsMarketingColumn = true;
+      if (includeIdentity) supportsCourierIdentityColumns = true;
       return res as { data: T | null; error: null };
     }
-    if (isMissingAcceptsMarketingError(res.error)) {
+
+    let retried = false;
+    if (includeMarketing && isMissingAcceptsMarketingError(res.error)) {
       supportsAcceptsMarketingColumn = false;
-      const fallback = await runner(BASE_SAFE_PROFILE_COLUMNS, false);
-      return fallback as {
+      includeMarketing = false;
+      retried = true;
+    }
+    if (includeIdentity && isMissingCourierIdentityColumnError(res.error)) {
+      supportsCourierIdentityColumns = false;
+      includeIdentity = false;
+      retried = true;
+    }
+
+    if (!retried) {
+      return res as {
         data: T | null;
         error: { code?: string; message: string } | null;
       };
     }
-    return res as {
-      data: T | null;
-      error: { code?: string; message: string } | null;
-    };
   }
-  const fallback = await runner(BASE_SAFE_PROFILE_COLUMNS, false);
+
+  const finalCols = buildProfileColumns(false, false);
+  const fallback = await runner(finalCols, false, false);
   return fallback as {
     data: T | null;
     error: { code?: string; message: string } | null;
@@ -659,6 +788,23 @@ export async function fetchAllProfiles(): Promise<Profile[]> {
  * para exibir notas (estrelas) e identificar remetentes/condutores nas avaliações.
  */
 export async function fetchPublicProfilesDirectory(): Promise<Profile[]> {
+  if (supportsCourierIdentityColumns !== false) {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select(`${PUBLIC_DIRECTORY_COLUMNS}, ${COURIER_IDENTITY_COLUMNS}`)
+      .order('created_at', { ascending: false });
+
+    if (!error) {
+      supportsCourierIdentityColumns = true;
+      return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+    }
+
+    if (!isMissingCourierIdentityColumnError(error)) {
+      throw new Error(error.message);
+    }
+    supportsCourierIdentityColumns = false;
+  }
+
   const { data, error } = await supabase
     .from('profiles')
     .select(PUBLIC_DIRECTORY_COLUMNS)
@@ -795,6 +941,32 @@ export async function insertProfileInSupabase(
     await assertEmailIsAvailable(cleanEmail);
   }
 
+  const cleanVehicleModel = isDriverOrCourier
+    ? profile.vehicleModel?.trim() || null
+    : null;
+  const cleanVehicleColor = isDriverOrCourier
+    ? profile.vehicleColor?.trim() || null
+    : null;
+  const cleanVehiclePlate =
+    isDriverOrCourier && profile.vehicleType !== 'Bike'
+      ? normalizePlateForDisplay(profile.plate) || null
+      : isDriverOrCourier && profile.plate?.trim()
+      ? normalizePlateForDisplay(profile.plate) || null
+      : null;
+  const cleanAvatarUrl = isDriverOrCourier
+    ? profile.avatarUrl?.trim() || null
+    : null;
+
+  const fallbackMetaEncoded =
+    isDriverOrCourier && resolvedPersonType !== 'PJ'
+      ? encodeCourierIdentityMeta({
+          a: cleanAvatarUrl || undefined,
+          m: cleanVehicleModel || undefined,
+          c: cleanVehicleColor || undefined,
+          p: cleanVehiclePlate || undefined,
+        })
+      : null;
+
   const basePayload: Record<string, unknown> = {
     name: profile.name,
     phone: profile.phone,
@@ -824,19 +996,27 @@ export async function insertProfileInSupabase(
   };
 
   const { data, error } = await runProfileQuery<DbProfileRow>(
-    (cols, includeMarketing) =>
-      supabase
+    (cols, includeMarketing, includeIdentity) => {
+      const insertPayload: Record<string, unknown> = {
+        ...basePayload,
+      };
+      if (includeMarketing) {
+        insertPayload.accepts_marketing = Boolean(profile.acceptsMarketing);
+      }
+      if (includeIdentity) {
+        insertPayload.avatar_url = cleanAvatarUrl;
+        insertPayload.vehicle_model = cleanVehicleModel;
+        insertPayload.vehicle_color = cleanVehicleColor;
+        insertPayload.vehicle_plate = cleanVehiclePlate;
+      } else if (fallbackMetaEncoded) {
+        insertPayload.company_legal_name = fallbackMetaEncoded;
+      }
+      return supabase
         .from('profiles')
-        .insert(
-          includeMarketing
-            ? {
-                ...basePayload,
-                accepts_marketing: Boolean(profile.acceptsMarketing),
-              }
-            : basePayload
-        )
+        .insert(insertPayload)
         .select(cols)
-        .single()
+        .single();
+    }
   );
 
   if (error) {
@@ -931,8 +1111,12 @@ export interface AdminProfileUpdateInput {
   approvalStatus: ApprovalStatus;
   accessPin?: string;
   pixKey?: string;
+  avatarUrl?: string | null;
   vehicleType?: VehicleType | null;
   propulsion?: PropulsionType | null;
+  vehicleModel?: string | null;
+  vehicleColor?: string | null;
+  plate?: string | null;
   bikeMaxRadiusKm?: number | null;
   hasEar?: boolean;
 }
@@ -959,6 +1143,29 @@ export async function adminUpdateProfileInSupabase(
   const isDriverOrCourier =
     input.role === 'entregador' || input.role === 'motorista';
   const docDigits = onlyDigits(input.documentNumber || '');
+
+  const cleanVehicleModel = isDriverOrCourier
+    ? input.vehicleModel?.trim() || null
+    : null;
+  const cleanVehicleColor = isDriverOrCourier
+    ? input.vehicleColor?.trim() || null
+    : null;
+  const cleanVehiclePlate = isDriverOrCourier
+    ? normalizePlateForDisplay(input.plate) || null
+    : null;
+  const cleanAvatarUrl = isDriverOrCourier
+    ? input.avatarUrl?.trim() || null
+    : null;
+
+  const fallbackMetaEncoded =
+    isDriverOrCourier && input.personType !== 'PJ'
+      ? encodeCourierIdentityMeta({
+          a: cleanAvatarUrl || undefined,
+          m: cleanVehicleModel || undefined,
+          c: cleanVehicleColor || undefined,
+          p: cleanVehiclePlate || undefined,
+        })
+      : null;
 
   const basePayload: Record<string, unknown> = {
     name: cleanName,
@@ -988,17 +1195,29 @@ export async function adminUpdateProfileInSupabase(
     basePayload.access_pin = cleanPin;
   }
 
-  const { data, error } = await runProfileQuery((cols, includeMarketing) =>
-    supabase
-      .from('profiles')
-      .update(
-        includeMarketing && input.acceptsMarketing !== undefined
-          ? { ...basePayload, accepts_marketing: Boolean(input.acceptsMarketing) }
-          : basePayload
-      )
-      .eq('id', input.profileId)
-      .select(cols)
-      .single()
+  const { data, error } = await runProfileQuery(
+    (cols, includeMarketing, includeIdentity) => {
+      const updatePayload: Record<string, unknown> = {
+        ...basePayload,
+      };
+      if (includeMarketing && input.acceptsMarketing !== undefined) {
+        updatePayload.accepts_marketing = Boolean(input.acceptsMarketing);
+      }
+      if (includeIdentity) {
+        updatePayload.avatar_url = cleanAvatarUrl;
+        updatePayload.vehicle_model = cleanVehicleModel;
+        updatePayload.vehicle_color = cleanVehicleColor;
+        updatePayload.vehicle_plate = cleanVehiclePlate;
+      } else if (isDriverOrCourier && input.personType !== 'PJ') {
+        updatePayload.company_legal_name = fallbackMetaEncoded;
+      }
+      return supabase
+        .from('profiles')
+        .update(updatePayload)
+        .eq('id', input.profileId)
+        .select(cols)
+        .single();
+    }
   );
 
   if (error) {
@@ -1017,6 +1236,66 @@ export async function adminUpdateProfileInSupabase(
         'Este CPF/CNPJ ou telefone já pertence a outro usuário cadastrado.'
       );
     }
+    throw new Error(error.message);
+  }
+
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
+}
+
+export async function updateCourierIdentityInSupabase(params: {
+  profileId: string;
+  avatarUrl?: string | null;
+  vehicleType: VehicleType;
+  propulsion: PropulsionType;
+  vehicleModel: string;
+  vehicleColor: string;
+  plate?: string;
+  bikeMaxRadiusKm?: number | null;
+}): Promise<Profile> {
+  const cleanModel = params.vehicleModel.trim();
+  const cleanColor = params.vehicleColor.trim();
+  const cleanPlate = normalizePlateForDisplay(params.plate) || null;
+  const cleanAvatar = params.avatarUrl?.trim() || null;
+
+  const fallbackMetaEncoded = encodeCourierIdentityMeta({
+    a: cleanAvatar || undefined,
+    m: cleanModel || undefined,
+    c: cleanColor || undefined,
+    p: cleanPlate || undefined,
+  });
+
+  const basePayload: Record<string, unknown> = {
+    vehicle_type: params.vehicleType,
+    propulsion: params.propulsion,
+    max_radius_km:
+      params.vehicleType === 'Bike'
+        ? params.bikeMaxRadiusKm === undefined
+          ? 3
+          : params.bikeMaxRadiusKm
+        : null,
+  };
+
+  const { data, error } = await runProfileQuery(
+    (cols, _includeMarketing, includeIdentity) => {
+      const updatePayload: Record<string, unknown> = { ...basePayload };
+      if (includeIdentity) {
+        updatePayload.avatar_url = cleanAvatar;
+        updatePayload.vehicle_model = cleanModel || null;
+        updatePayload.vehicle_color = cleanColor || null;
+        updatePayload.vehicle_plate = cleanPlate;
+      } else {
+        updatePayload.company_legal_name = fallbackMetaEncoded;
+      }
+      return supabase
+        .from('profiles')
+        .update(updatePayload)
+        .eq('id', params.profileId)
+        .select(cols)
+        .single();
+    }
+  );
+
+  if (error) {
     throw new Error(error.message);
   }
 
@@ -1680,6 +1959,113 @@ export async function acceptDeliveryInSupabase(
     stopsMap.get((updatedRow as DbDeliveryRow).id) || [],
     profileMap
   );
+}
+
+export async function fetchProfilesPhonesByIds(
+  profileIds: string[]
+): Promise<Map<string, string>> {
+  const uniqueIds = Array.from(new Set(profileIds.filter(Boolean)));
+  const phoneMap = new Map<string, string>();
+  if (uniqueIds.length === 0) return phoneMap;
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('id, phone')
+    .in('id', uniqueIds);
+
+  if (error || !data) {
+    return phoneMap;
+  }
+
+  for (const row of data as Array<{ id: string; phone?: string | null }>) {
+    if (row.id && row.phone) {
+      phoneMap.set(row.id, row.phone);
+    }
+  }
+  return phoneMap;
+}
+
+export async function updateDeliveryQuickNoticeInSupabase(params: {
+  orderId: string;
+  noticeType: CourierQuickNoticeType;
+  stopSequence?: number;
+  profilesList?: Profile[];
+}): Promise<Order> {
+  const { orderId, noticeType, stopSequence, profilesList } = params;
+  const nowIso = new Date().toISOString();
+
+  let { data: updatedRow, error } = await supabase
+    .from('deliveries')
+    .update({
+      courier_notice: noticeType,
+      courier_notice_at: nowIso,
+    })
+    .eq('id', orderId)
+    .select('*')
+    .single();
+
+  if (
+    error &&
+    (error.code === 'PGRST204' ||
+      error.code === '42703' ||
+      error.message.includes('courier_notice'))
+  ) {
+    const { data: currentRow, error: readErr } = await supabase
+      .from('deliveries')
+      .select('source_channel')
+      .eq('id', orderId)
+      .single();
+
+    if (readErr) {
+      throw new Error(readErr.message);
+    }
+
+    const baseSource = String(
+      (currentRow as { source_channel?: string | null } | null)
+        ?.source_channel || 'Lojista Porto Alegre'
+    )
+      .replace(/\s*\[AVISO:[^\]]*\]/g, '')
+      .trim();
+
+    const noticeTag = stopSequence
+      ? `[AVISO:${noticeType}|${nowIso}|${stopSequence}]`
+      : `[AVISO:${noticeType}|${nowIso}]`;
+
+    const retryRes = await supabase
+      .from('deliveries')
+      .update({
+        source_channel: `${baseSource} ${noticeTag}`.trim(),
+      })
+      .eq('id', orderId)
+      .select('*')
+      .single();
+
+    updatedRow = retryRes.data;
+    error = retryRes.error;
+  }
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const rowObj = updatedRow as DbDeliveryRow;
+  const stopsMap = await fetchStopsForDeliveries([rowObj.id]);
+  const profileMap = new Map(
+    (profilesList || []).map((p) => [p.id, p] as const)
+  );
+  const normalized = normalizeOrderFromRows(
+    rowObj,
+    stopsMap.get(rowObj.id) || [],
+    profileMap
+  );
+
+  // Ensure notice is attached even if DB schema didn't return courier_notice
+  return {
+    ...normalized,
+    courierQuickNotice:
+      normalized.courierQuickNotice ||
+      buildCourierQuickNotice(noticeType, nowIso, stopSequence),
+  };
 }
 
 export async function confirmDeliveryStopInSupabase(params: {

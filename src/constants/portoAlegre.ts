@@ -125,15 +125,43 @@ export function buildGoogleMapsStopUrl(stop: {
   lat?: number;
   lng?: number;
 }): string {
-  const query = stop.address.trim()
+  const hasCoords =
+    stop.lat !== undefined &&
+    stop.lng !== undefined &&
+    !Number.isNaN(stop.lat) &&
+    !Number.isNaN(stop.lng);
+  const destination = stop.address.trim()
     ? `${stop.address.trim()}, ${stop.neighborhood}, Porto Alegre - RS, Brasil`
-    : stop.lat !== undefined && stop.lng !== undefined
+    : hasCoords
     ? `${stop.lat},${stop.lng}`
     : `${stop.neighborhood}, Porto Alegre - RS, Brasil`;
 
   return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(
-    query
+    destination
   )}&travelmode=driving`;
+}
+
+export function buildWazeStopUrl(stop: {
+  address: string;
+  neighborhood: string;
+  lat?: number;
+  lng?: number;
+}): string {
+  const hasCoords =
+    stop.lat !== undefined &&
+    stop.lng !== undefined &&
+    !Number.isNaN(stop.lat) &&
+    !Number.isNaN(stop.lng);
+
+  if (hasCoords) {
+    return `https://waze.com/ul?ll=${stop.lat},${stop.lng}&navigate=yes`;
+  }
+
+  const query = stop.address.trim()
+    ? `${stop.address.trim()}, ${stop.neighborhood}, Porto Alegre, RS`
+    : `${stop.neighborhood}, Porto Alegre, RS`;
+
+  return `https://waze.com/ul?q=${encodeURIComponent(query)}&navigate=yes`;
 }
 
 export const POA_STREETS_BY_NEIGHBORHOOD: Record<string, string[]> = {

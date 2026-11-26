@@ -34,6 +34,18 @@ export type OrderFlowDirection = 'enviar' | 'receber';
 
 export type PickupScheduleMode = 'imediata' | 'agendada';
 
+export type CourierQuickNoticeType =
+  | 'chegando_coleta'
+  | 'chegou_coleta'
+  | 'chegando_entrega';
+
+export interface CourierQuickNotice {
+  type: CourierQuickNoticeType;
+  message: string;
+  updatedAt: string;
+  stopSequence?: number;
+}
+
 export interface PickupSchedule {
   mode: PickupScheduleMode;
   readyAt?: string;
@@ -63,9 +75,11 @@ export interface Profile {
   neighborhood: string;
   address?: string;
   twoFactorEnabled?: boolean;
+  avatarUrl?: string;
   vehicleType?: VehicleType;
   propulsion?: PropulsionType;
   vehicleModel?: string;
+  vehicleColor?: string;
   plate?: string;
   cnhNumber?: string;
   hasEar?: boolean;
@@ -112,6 +126,7 @@ export interface Order {
   pickupSchedule?: PickupSchedule;
   merchantId: string;
   merchantName: string;
+  merchantPhone?: string;
   merchantRatingAvg?: number;
   merchantRatingCount?: number;
   pickupAddress: string;
@@ -131,6 +146,11 @@ export interface Order {
   paymentStatus?: PaymentStatus;
   assignedCourierId?: string;
   assignedCourierName?: string;
+  assignedCourierAvatarUrl?: string;
+  assignedCourierVehicleType?: VehicleType;
+  assignedCourierVehicleModel?: string;
+  assignedCourierVehicleColor?: string;
+  assignedCourierPlate?: string;
   assignedCourierPixKey?: string;
   assignedCourierPropulsion?: PropulsionType;
   assignedCourierRatingAvg?: number;
@@ -138,6 +158,7 @@ export interface Order {
   appliedPlatformFee?: number;
   evBonusApplied?: number;
   netCourierPayout?: number;
+  courierQuickNotice?: CourierQuickNotice;
   createdAt: string;
   acceptedAt?: string;
   completedAt?: string;

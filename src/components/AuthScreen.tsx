@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Bike,
   Building2,
+  Camera,
   CheckCircle2,
   Clock,
   Database,
@@ -17,10 +18,12 @@ import {
   Search,
   ShieldAlert,
   Store,
+  Trash2,
   User,
   UserPlus,
   Zap,
 } from 'lucide-react';
+import { CourierAvatar } from './CourierAvatar';
 import { LegalDocTab, LegalModal } from './LegalModal';
 import { PWAInstallButton } from './PWAInstallButton';
 import {
@@ -43,7 +46,12 @@ import {
   lookupCnpjBrasilApi,
   onlyDigits,
 } from '../utils/documentValidation';
+import {
+  formatPlateInput,
+  isValidBrazilianPlate,
+} from '../utils/courierIdentity';
 import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
+import { compressImageToJpeg } from '../utils/imageCompression';
 import { getPixKeyPlaceholder, PIX_KEY_TYPES } from '../utils/pix';
 import { isZeroFeePropulsion } from '../utils/pricing';
 import {
@@ -119,6 +127,11 @@ export function AuthScreen({
   const [regPin, setRegPin] = useState('');
   const [vehicleType, setVehicleType] = useState<VehicleType>('Moto');
   const [propulsion, setPropulsion] = useState<PropulsionType>('Elétrico');
+  const [regAvatarUrl, setRegAvatarUrl] = useState<string>('');
+  const [isCompressingAvatar, setIsCompressingAvatar] = useState(false);
+  const [regVehicleModel, setRegVehicleModel] = useState<string>('');
+  const [regVehicleColor, setRegVehicleColor] = useState<string>('');
+  const [regVehiclePlate, setRegVehiclePlate] = useState<string>('');
   const [bikeMaxRadiusKm, setBikeMaxRadiusKm] = useState<number | null>(3);
   const [hasEar, setHasEar] = useState<boolean>(false);
   const [pixKeyType, setPixKeyType] = useState<PixKeyType>('Telefone');
@@ -160,12 +173,35 @@ export function AuthScreen({
           ? 'Propulsão Humana (Convencional)'
           : 'Elétrica / Pedal Assistido (E-Bike)'
       );
+      setRegVehiclePlate('');
     } else {
       setPropulsion((prev) =>
         prev === 'Combustão' || prev === 'Propulsão Humana (Convencional)'
           ? 'Combustão'
           : 'Elétrico'
       );
+    }
+  };
+
+  const handleAvatarFileChange = async (
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setRegError('');
+    setIsCompressingAvatar(true);
+    try {
+      const compressed = await compressImageToJpeg(file, 280, 0.72);
+      setRegAvatarUrl(compressed);
+    } catch (err) {
+      setRegError(
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível processar a foto selecionada.'
+      );
+    } finally {
+      setIsCompressingAvatar(false);
+      e.target.value = '';
     }
   };
 
@@ -486,6 +522,23 @@ export function AuthScreen({
       return;
     }
 
+    if (regRole === 'entregador') {
+      if (!regVehicleModel.trim() || !regVehicleColor.trim()) {
+        setRegError(
+          'Informe o modelo e a cor do veículo (ex.: Honda CG 160 / Preta) para identificação do cliente.'
+        );
+        return;
+      }
+      if (vehicleType !== 'Bike') {
+        if (!regVehiclePlate.trim() || !isValidBrazilianPlate(regVehiclePlate)) {
+          setRegError(
+            'Informe uma placa válida em letras maiúsculas (ex.: ABC1D23 ou ABC-1234).'
+          );
+          return;
+        }
+      }
+    }
+
     setIsRegistering(true);
     try {
       const created = await insertProfileInSupabase({
@@ -498,8 +551,20 @@ export function AuthScreen({
         document: regDocument,
         documentNumber: docDigits,
         neighborhood: 'Porto Alegre',
+        avatarUrl:
+          regRole === 'entregador' ? regAvatarUrl || undefined : undefined,
         vehicleType: regRole === 'entregador' ? vehicleType : undefined,
         propulsion: regRole === 'entregador' ? propulsion : undefined,
+        vehicleModel:
+          regRole === 'entregador' ? regVehicleModel.trim() : undefined,
+        vehicleColor:
+          regRole === 'entregador' ? regVehicleColor.trim() : undefined,
+        plate:
+          regRole === 'entregador' && vehicleType !== 'Bike'
+            ? regVehiclePlate.trim().toUpperCase()
+            : regRole === 'entregador' && regVehiclePlate.trim()
+            ? regVehiclePlate.trim().toUpperCase()
+            : undefined,
         bikeMaxRadiusKm:
           regRole === 'entregador' && vehicleType === 'Bike'
             ? bikeMaxRadiusKm
@@ -1300,6 +1365,140 @@ export function AuthScreen({
                         : 'Selo Elétrico · Bônus EV: taxa R$ 0,00 revertida ao condutor.'}
                     </p>
                   )}
+
+                  {/* Identificação Visual e Veículo (Foto, Modelo, Cor e Placa) */}
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3.5 space-y-3">
+                    <div>
+                      <span className="block text-xs font-bold text-zinc-900">
+                        Identificação Visual &amp; Segurança do Cliente
+                      </span>
+                      <p className="text-[11px] text-zinc-600">
+                        Sua foto, modelo/cor e placa aparecem ao cliente no momento
+                        da corrida para conferência na porta.
+                      </p>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                      <CourierAvatar
+                        name={regName || 'Entregador'}
+                        avatarUrl={regAvatarUrl || undefined}
+                        size="lg"
+                      />
+                      <div className="flex-1 space-y-1.5">
+                        <label
+                          htmlFor="reg-courier-avatar"
+                          className="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs font-semibold text-zinc-800 hover:bg-zinc-50"
+                        >
+                          <Camera
+                            className="h-3.5 w-3.5 text-emerald-600"
+                            aria-hidden="true"
+                          />
+                          <span>
+                            {isCompressingAvatar
+                              ? 'Processando foto...'
+                              : regAvatarUrl
+                              ? 'Trocar Foto do Perfil'
+                              : 'Enviar Foto do Entregador'}
+                          </span>
+                          <input
+                            id="reg-courier-avatar"
+                            type="file"
+                            accept="image/*"
+                            onChange={(e) => void handleAvatarFileChange(e)}
+                            className="sr-only"
+                          />
+                        </label>
+                        {regAvatarUrl && (
+                          <button
+                            type="button"
+                            onClick={() => setRegAvatarUrl('')}
+                            className="ml-2 inline-flex items-center gap-1 text-[11px] font-semibold text-red-600 hover:text-red-700"
+                          >
+                            <Trash2 className="h-3 w-3" aria-hidden="true" />
+                            <span>Remover</span>
+                          </button>
+                        )}
+                        <p className="text-[11px] text-zinc-500">
+                          Foto nítida do rosto (JPG/PNG). Recomendada para agilizar
+                          a aprovação.
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                      <div>
+                        <label
+                          htmlFor="reg-vehicle-model"
+                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
+                        >
+                          Modelo do Veículo <span className="text-red-600">*</span>
+                        </label>
+                        <input
+                          id="reg-vehicle-model"
+                          type="text"
+                          value={regVehicleModel}
+                          onChange={(e) => setRegVehicleModel(e.target.value)}
+                          placeholder={
+                            vehicleType === 'Bike'
+                              ? 'Ex: Caloi E-Vibe'
+                              : vehicleType === 'Moto'
+                              ? 'Ex: Honda CG 160'
+                              : 'Ex: Fiat Fiorino'
+                          }
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="reg-vehicle-color"
+                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
+                        >
+                          Cor do Veículo <span className="text-red-600">*</span>
+                        </label>
+                        <input
+                          id="reg-vehicle-color"
+                          type="text"
+                          value={regVehicleColor}
+                          onChange={(e) => setRegVehicleColor(e.target.value)}
+                          placeholder="Ex: Preta"
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="reg-vehicle-plate"
+                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
+                        >
+                          Placa do Veículo{' '}
+                          {vehicleType === 'Bike' ? (
+                            <span className="font-normal text-zinc-500">
+                              (opcional)
+                            </span>
+                          ) : (
+                            <span className="text-red-600">*</span>
+                          )}
+                        </label>
+                        <input
+                          id="reg-vehicle-plate"
+                          type="text"
+                          maxLength={8}
+                          disabled={vehicleType === 'Bike'}
+                          value={regVehiclePlate}
+                          onChange={(e) =>
+                            setRegVehiclePlate(formatPlateInput(e.target.value))
+                          }
+                          placeholder={
+                            vehicleType === 'Bike'
+                              ? 'Não exige placa'
+                              : 'ABC1D23'
+                          }
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-zinc-900 placeholder:font-normal placeholder:tracking-normal placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-zinc-100"
+                        />
+                      </div>
+                    </div>
+                  </div>
 
                   <label className="flex items-center gap-2.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 cursor-pointer text-xs text-zinc-800">
                     <input

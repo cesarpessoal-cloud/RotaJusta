@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowRightLeft,
+  BellRing,
+  Bike,
   CalendarClock,
   Camera,
   Check,
@@ -16,6 +18,7 @@ import {
   QrCode,
   Search,
   Send,
+  ShieldCheck,
   Sparkles,
   Trash2,
   Truck,
@@ -33,6 +36,7 @@ import {
   StructuredAddressValue,
 } from '../utils/addressLookup';
 import { AddressAutocompleteFields } from './AddressAutocompleteFields';
+import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
 import {
   CargoSize,
   DeliveryStop,
@@ -46,6 +50,7 @@ import {
   Profile,
   Rating,
 } from '../types';
+import { formatVehicleModelAndColor } from '../utils/courierIdentity';
 import { formatPaymentMethodLabel } from '../utils/pix';
 import {
   calculatePricing,
@@ -58,6 +63,7 @@ import {
   formatPickupCode,
   normalizeCodeSearchQuery,
 } from '../utils/pickupCode';
+import { QUICK_NOTICE_META } from '../utils/quickNotice';
 import {
   formatPickupScheduleLabel,
   getTodayDateInputValue,
@@ -1994,6 +2000,158 @@ export function MerchantPanel({
                     </div>
                   </div>
 
+                  {/* Cartão de Identificação Visual e Segurança do Entregador */}
+                  {order.status !== 'Aguardando' && order.assignedCourierName && (() => {
+                    const vehicleModelAndColor = formatVehicleModelAndColor(
+                      order.assignedCourierVehicleModel,
+                      order.assignedCourierVehicleColor
+                    );
+                    const isBikeCourier =
+                      order.assignedCourierVehicleType === 'Bike';
+
+                    return (
+                      <div
+                        className={`mt-4 rounded-xl border-2 p-3.5 sm:p-4 space-y-3 ${
+                          order.status === 'Em Rota'
+                            ? 'border-emerald-300 bg-emerald-50/50'
+                            : 'border-zinc-200 bg-zinc-50/70'
+                        }`}
+                      >
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-center gap-3">
+                            <CourierAvatar
+                              name={order.assignedCourierName}
+                              avatarUrl={order.assignedCourierAvatarUrl}
+                              size="lg"
+                            />
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="inline-flex items-center gap-1 rounded bg-emerald-700 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-white">
+                                  <ShieldCheck
+                                    className="h-3 w-3"
+                                    aria-hidden="true"
+                                  />
+                                  <span>Entregador Identificado</span>
+                                </span>
+                                <RatingBadge
+                                  avg={order.assignedCourierRatingAvg}
+                                  count={order.assignedCourierRatingCount}
+                                  compact
+                                />
+                              </div>
+                              <p className="font-display text-sm sm:text-base font-bold text-zinc-900">
+                                {order.assignedCourierName}
+                              </p>
+                              <p className="text-xs text-zinc-600">
+                                {order.assignedCourierVehicleType || 'Veículo'}
+                                {vehicleModelAndColor
+                                  ? ` · ${vehicleModelAndColor}`
+                                  : ''}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                            {isBikeCourier ? (
+                              <span className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-bold text-emerald-800 shadow-2xs">
+                                <Bike
+                                  className="h-4 w-4 text-emerald-600"
+                                  aria-hidden="true"
+                                />
+                                <span>Entrega de Bicicleta</span>
+                              </span>
+                            ) : (
+                              <VehiclePlateBadge
+                                plate={order.assignedCourierPlate}
+                              />
+                            )}
+                          </div>
+                        </div>
+
+                        {order.status === 'Em Rota' && (
+                          <p className="flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs font-semibold text-amber-950">
+                            <ShieldCheck
+                              className="h-4 w-4 text-amber-700 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span>
+                              Confira a foto, a{' '}
+                              {isBikeCourier ? 'bicicleta' : 'placa'} e o código{' '}
+                              <strong className="font-mono">{order.code}</strong>{' '}
+                              antes de entregar o pacote.
+                            </span>
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Aviso em Tempo Real do Entregador com 1 Toque */}
+                  {order.status === 'Em Rota' && order.courierQuickNotice && (() => {
+                    const notice = order.courierQuickNotice;
+                    const meta = QUICK_NOTICE_META[notice.type];
+                    const toneClasses =
+                      meta.tone === 'emerald'
+                        ? 'border-emerald-500 bg-emerald-50 text-emerald-950'
+                        : meta.tone === 'amber'
+                        ? 'border-amber-500 bg-amber-50 text-amber-950'
+                        : 'border-sky-500 bg-sky-50 text-sky-950';
+                    const dotColor =
+                      meta.tone === 'emerald'
+                        ? 'bg-emerald-600'
+                        : meta.tone === 'amber'
+                        ? 'bg-amber-600'
+                        : 'bg-sky-600';
+
+                    return (
+                      <div
+                        role="status"
+                        aria-live="polite"
+                        className={`mt-4 rounded-xl border-2 p-3.5 sm:p-4 shadow-xs space-y-2 ${toneClasses}`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="inline-flex items-center gap-2">
+                            <span className="relative flex h-2.5 w-2.5 shrink-0">
+                              <span
+                                className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${dotColor}`}
+                              />
+                              <span
+                                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${dotColor}`}
+                              />
+                            </span>
+                            <BellRing className="h-4 w-4 shrink-0" aria-hidden="true" />
+                            <span className="text-[11px] font-extrabold uppercase tracking-wider">
+                              Aviso do Entregador em Tempo Real
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-md bg-zinc-950 px-2 py-0.5 font-mono text-xs font-black text-white">
+                              {order.code}
+                            </span>
+                            <span className="font-mono text-[11px] opacity-80">
+                              {formatDateTimeBR(notice.updatedAt)}
+                            </span>
+                          </div>
+                        </div>
+
+                        <p className="font-display text-sm sm:text-base font-extrabold leading-snug">
+                          {meta.clientHeadline}
+                          {notice.stopSequence && order.stops.length > 1
+                            ? ` (Parada #${notice.stopSequence})`
+                            : ''}
+                        </p>
+
+                        <p className="text-xs opacity-90">
+                          {order.assignedCourierName
+                            ? `Entregador: ${order.assignedCourierName} · `
+                            : ''}
+                          {meta.clientSubtext}
+                        </p>
+                      </div>
+                    );
+                  })()}
+
                   {/* Código Único de Retirada em Destaque (#RS-XXXX) para Pedido Ativo */}
                   {order.status !== 'Entregue' && (
                     <div className="mt-4 rounded-xl border-2 border-amber-300 bg-amber-50/80 p-3.5 space-y-2">
@@ -2267,7 +2425,8 @@ export function MerchantPanel({
                             lng: order.pickupLng,
                           }}
                           stops={order.stops}
-                          heightClass="h-[260px]"
+                          orderCode={order.code}
+                          heightClass="h-[270px]"
                           title={`Mapa ${order.code}`}
                         />
                       </div>

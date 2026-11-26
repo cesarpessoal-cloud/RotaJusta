@@ -34,6 +34,7 @@ import {
   fetchDeliveryByIdWithStops,
   fetchOnlineCouriersCountInSupabase,
   fetchPlatformPixKey,
+  fetchProfilesPhonesByIds,
   fetchPublicProfilesDirectory,
   fetchWaitingDeliveries,
   mapDbStatusToApproval,
@@ -42,11 +43,19 @@ import {
   updateBikeMaxRadiusInSupabase,
   updateCourierOnlineStatusInSupabase,
   updateDeliveryPaymentStatusInSupabase,
+  updateDeliveryQuickNoticeInSupabase,
   updatePixKeyInSupabase,
   updateProfileStatusInSupabase,
 } from './lib/supabaseService';
-import { ApprovalStatus, Order, Profile, Rating } from './types';
+import {
+  ApprovalStatus,
+  CourierQuickNoticeType,
+  Order,
+  Profile,
+  Rating,
+} from './types';
 import { formatBRL, getCourierSettlementForOrder } from './utils/pricing';
+import { getQuickNoticeMessage } from './utils/quickNotice';
 import {
   playRotaJustaAlert,
   requestBrowserNotificationPermission,
@@ -301,11 +310,29 @@ export default function App() {
                 profilesRef.current.length > 0
                   ? profilesRef.current
                   : approvedCouriersRef.current;
-              const updatedOrder = await fetchDeliveryByIdWithStops(
+              const rawUpdated = await fetchDeliveryByIdWithStops(
                 deliveryId,
                 knownProfiles
               );
-              if (!updatedOrder) return;
+              if (!rawUpdated) return;
+
+              let updatedOrder = rawUpdated;
+              if (
+                updatedOrder.status === 'Em Rota' &&
+                !updatedOrder.merchantPhone &&
+                updatedOrder.merchantId
+              ) {
+                const phoneMap = await fetchProfilesPhonesByIds([
+                  updatedOrder.merchantId,
+                ]);
+                const fetchedPhone = phoneMap.get(updatedOrder.merchantId);
+                if (fetchedPhone) {
+                  updatedOrder = {
+                    ...updatedOrder,
+                    merchantPhone: fetchedPhone,
+                  };
+                }
+              }
 
               setOrders((prev) =>
                 prev.some((o) => o.id === updatedOrder.id)
@@ -482,9 +509,22 @@ export default function App() {
             fetchAllDeliveries(mergedDirectory),
             fetchWaitingDeliveries(mergedDirectory),
           ]);
+          const activeMerchantIds = allDeliveries
+            .filter((o) => o.status === 'Em Rota' && o.merchantId)
+            .map((o) => o.merchantId);
+          const phoneMap = await fetchProfilesPhonesByIds(activeMerchantIds);
+          const enrichedDeliveries =
+            phoneMap.size > 0
+              ? allDeliveries.map((o) =>
+                  o.merchantId && phoneMap.has(o.merchantId)
+                    ? { ...o, merchantPhone: phoneMap.get(o.merchantId) }
+                    : o
+                )
+              : allDeliveries;
+
           setProfiles(mergedDirectory);
           setApprovedCouriers([user]);
-          setOrders(allDeliveries);
+          setOrders(enrichedDeliveries);
           setWaitingOrders(waitingDeliveries);
           setRatings(allRatings);
           setActiveCourierId(user.id);
@@ -548,6 +588,23 @@ export default function App() {
     );
     setApprovedCouriers((prev) =>
       prev.map((c) => (c.id === updated.id ? updated : c))
+    );
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.assignedCourierId === updated.id
+          ? {
+              ...o,
+              assignedCourierName: updated.name,
+              assignedCourierAvatarUrl: updated.avatarUrl,
+              assignedCourierVehicleType: updated.vehicleType,
+              assignedCourierVehicleModel: updated.vehicleModel,
+              assignedCourierVehicleColor: updated.vehicleColor,
+              assignedCourierPlate: updated.plate,
+              assignedCourierPropulsion: updated.propulsion,
+              assignedCourierPixKey: updated.pixKey,
+            }
+          : o
+      )
     );
     showToast(message);
   };
@@ -714,8 +771,35 @@ export default function App() {
         propulsion,
       });
 
+      let enrichedOrder: Order = {
+        ...updatedOrder,
+        assignedCourierAvatarUrl:
+          updatedOrder.assignedCourierAvatarUrl || courier.avatarUrl,
+        assignedCourierVehicleType:
+          updatedOrder.assignedCourierVehicleType || courier.vehicleType,
+        assignedCourierVehicleModel:
+          updatedOrder.assignedCourierVehicleModel || courier.vehicleModel,
+        assignedCourierVehicleColor:
+          updatedOrder.assignedCourierVehicleColor || courier.vehicleColor,
+        assignedCourierPlate: updatedOrder.assignedCourierPlate || courier.plate,
+      };
+      if (!enrichedOrder.merchantPhone && targetOrder.merchantPhone) {
+        enrichedOrder = {
+          ...enrichedOrder,
+          merchantPhone: targetOrder.merchantPhone,
+        };
+      } else if (!enrichedOrder.merchantPhone && enrichedOrder.merchantId) {
+        const phoneMap = await fetchProfilesPhonesByIds([
+          enrichedOrder.merchantId,
+        ]);
+        const foundPhone = phoneMap.get(enrichedOrder.merchantId);
+        if (foundPhone) {
+          enrichedOrder = { ...enrichedOrder, merchantPhone: foundPhone };
+        }
+      }
+
       setOrders((prev) =>
-        prev.map((o) => (o.id === orderId ? updatedOrder : o))
+        prev.map((o) => (o.id === orderId ? enrichedOrder : o))
       );
       setWaitingOrders((prev) => prev.filter((o) => o.id !== orderId));
       showToast(
@@ -724,6 +808,50 @@ export default function App() {
     } catch (err) {
       const msg =
         err instanceof Error ? err.message : 'Erro ao aceitar trabalho no Supabase.';
+      showToast(`Erro Supabase: ${msg}`);
+    }
+  };
+
+  const handleSendCourierQuickNotice = async (
+    orderId: string,
+    noticeType: CourierQuickNoticeType,
+    stopSequence?: number
+  ) => {
+    const targetOrder = orders.find((o) => o.id === orderId);
+    if (!targetOrder) return;
+
+    try {
+      const updatedOrder = await updateDeliveryQuickNoticeInSupabase({
+        orderId,
+        noticeType,
+        stopSequence,
+        profilesList:
+          profilesRef.current.length > 0
+            ? profilesRef.current
+            : approvedCouriersRef.current,
+      });
+
+      setOrders((prev) =>
+        prev.map((o) =>
+          o.id === orderId
+            ? {
+                ...updatedOrder,
+                merchantPhone: updatedOrder.merchantPhone || o.merchantPhone,
+              }
+            : o
+        )
+      );
+
+      showToast(
+        `Aviso enviado ao cliente (${targetOrder.code}): ${getQuickNoticeMessage(
+          noticeType
+        )}`
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Erro ao enviar aviso rápido no Supabase.';
       showToast(`Erro Supabase: ${msg}`);
     }
   };
@@ -1336,6 +1464,7 @@ export default function App() {
                 activeCourierId={currentUser.id}
                 onSelectCourier={setActiveCourierId}
                 onAcceptOrder={handleAcceptOrder}
+                onSendQuickNotice={handleSendCourierQuickNotice}
                 onConfirmStop={handleConfirmStop}
                 onCompleteOrder={handleCompleteOrder}
                 onUpdateBikeRadius={handleUpdateBikeRadius}
@@ -1343,6 +1472,12 @@ export default function App() {
                 onTestSoundAlert={handleTestSoundAlert}
                 onUpdateCourierPixKey={handleUpdateCourierPixKey}
                 onConfirmCourierPixReceipt={handleConfirmCourierPixReceipt}
+                onCourierProfileUpdated={(updated) =>
+                  handleAccountUpdated(
+                    updated,
+                    'Foto e dados do veículo atualizados no Supabase!'
+                  )
+                }
                 onSubmitRating={handleSubmitRating}
               />
             )}
@@ -1394,6 +1529,7 @@ export default function App() {
                 activeCourierId={activeCourierId}
                 onSelectCourier={setActiveCourierId}
                 onAcceptOrder={handleAcceptOrder}
+                onSendQuickNotice={handleSendCourierQuickNotice}
                 onConfirmStop={handleConfirmStop}
                 onCompleteOrder={handleCompleteOrder}
                 onUpdateBikeRadius={handleUpdateBikeRadius}
@@ -1401,6 +1537,12 @@ export default function App() {
                 onTestSoundAlert={handleTestSoundAlert}
                 onUpdateCourierPixKey={handleUpdateCourierPixKey}
                 onConfirmCourierPixReceipt={handleConfirmCourierPixReceipt}
+                onCourierProfileUpdated={(updated) =>
+                  handleAccountUpdated(
+                    updated,
+                    'Foto e dados do veículo atualizados no Supabase!'
+                  )
+                }
                 onSubmitRating={handleSubmitRating}
               />
             )}
