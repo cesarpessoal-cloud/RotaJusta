@@ -9,7 +9,9 @@ import {
   LogIn,
   MapPin,
   Package,
+  PackageCheck,
   Route,
+  Send,
   ShieldCheck,
   Store,
   Truck,
@@ -18,6 +20,7 @@ import {
   Zap,
 } from 'lucide-react';
 import heroPoaImage from '../assets/images/rotajusta_hero_poa_1795704483725.jpg';
+import { OrderFlowDirection } from '../types';
 import { RegProfileChoice } from './AuthScreen';
 import { PWAInstallButton } from './PWAInstallButton';
 
@@ -29,7 +32,10 @@ interface LandingPageProps {
   isSeeding: boolean;
   dbError: string | null;
   onOpenLogin: () => void;
-  onOpenRegister: (presetChoice: RegProfileChoice) => void;
+  onOpenRegister: (
+    presetChoice: RegProfileChoice,
+    presetFlow?: OrderFlowDirection
+  ) => void;
   onSeedTestData: () => Promise<void>;
 }
 
@@ -162,21 +168,32 @@ export function LandingPage({
                   respeito real a quem trabalha na rua.
                 </p>
 
-                <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap pt-1">
-                  <button
-                    type="button"
-                    onClick={() => onOpenRegister('pf_solicitante')}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-emerald-700"
-                  >
-                    <Package className="h-4 w-4 shrink-0" aria-hidden="true" />
-                    <span>Quero Enviar ou Pedir Frete</span>
-                    <ArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" />
-                  </button>
+                <div className="space-y-3 pt-1">
+                  <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      onClick={() => onOpenRegister('pf_solicitante', 'enviar')}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-emerald-700"
+                    >
+                      <Send className="h-4 w-4 shrink-0" aria-hidden="true" />
+                      <span>Quero Enviar um Item</span>
+                      <ArrowRight className="h-4 w-4 shrink-0" aria-hidden="true" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => onOpenRegister('pf_solicitante', 'receber')}
+                      className="inline-flex items-center justify-center gap-2 rounded-xl border-2 border-emerald-600 bg-emerald-50/70 px-4 py-3.5 text-sm font-semibold text-emerald-950 shadow-xs transition-colors hover:bg-emerald-100"
+                    >
+                      <PackageCheck className="h-4 w-4 text-emerald-700 shrink-0" aria-hidden="true" />
+                      <span>Quero Receber um Item</span>
+                    </button>
+                  </div>
 
                   <button
                     type="button"
                     onClick={() => onOpenRegister('pf_entregador')}
-                    className="inline-flex items-center justify-center gap-2 rounded-xl bg-zinc-950 px-5 py-3.5 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-zinc-800"
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-zinc-950 px-5 py-3 text-sm font-semibold text-white shadow-xs transition-colors hover:bg-zinc-800"
                   >
                     <Bike className="h-4 w-4 text-emerald-400 shrink-0" aria-hidden="true" />
                     <span>Quero Fazer Entregas</span>

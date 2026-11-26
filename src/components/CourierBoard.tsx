@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
   Bike,
+  CalendarClock,
   Camera,
   Check,
   CheckCircle2,
@@ -37,6 +38,7 @@ import {
   getCourierSettlementForOrder,
   isZeroFeePropulsion,
 } from '../utils/pricing';
+import { formatPickupScheduleLabel } from '../utils/schedule';
 import {
   BIKE_RADIUS_OPTIONS,
   getEffectiveBikeRadiusKm,
@@ -581,6 +583,9 @@ export function CourierBoard({
                     order,
                     activeCourier.propulsion || 'Combustão'
                   );
+                  const scheduleLabel = formatPickupScheduleLabel(
+                    order.pickupSchedule
+                  );
 
                   return (
                     <div
@@ -588,7 +593,7 @@ export function CourierBoard({
                       className="rounded-2xl border-2 border-emerald-500/70 bg-white p-4 sm:p-5 space-y-5 shadow-xs"
                     >
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-100 pb-4">
-                        <div className="space-y-1">
+                        <div className="space-y-1.5">
                           <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
                             <span className="font-mono font-bold text-zinc-900">
                               {order.code}
@@ -610,6 +615,20 @@ export function CourierBoard({
                             Coleta: {order.pickupNeighborhood} ({order.pickupAddress}
                             ) → {order.destinationNeighborhood}
                           </h3>
+                          {scheduleLabel && (
+                            <div className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900">
+                              <CalendarClock
+                                className="h-3.5 w-3.5 text-amber-700 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>{scheduleLabel}</span>
+                            </div>
+                          )}
+                          {order.flowDirection === 'receber' && (
+                            <p className="text-[11px] font-medium text-sky-800">
+                              Retirada em terceiros · Entrega direta ao solicitante
+                            </p>
+                          )}
                           {order.type === 'frete' && order.freightDetails && (
                             <p className="text-xs text-zinc-600">
                               Carga:{' '}
@@ -1000,6 +1019,9 @@ export function CourierBoard({
                   const isHighlightedUtilityFreight =
                     activeCourier.vehicleType === 'Utilitário / Picape / Van' &&
                     order.type === 'frete';
+                  const scheduleLabel = formatPickupScheduleLabel(
+                    order.pickupSchedule
+                  );
 
                   return (
                     <article
@@ -1065,6 +1087,16 @@ export function CourierBoard({
                           </div>
                         </div>
 
+                        {scheduleLabel && (
+                          <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs font-semibold text-amber-950">
+                            <CalendarClock
+                              className="h-4 w-4 text-amber-700 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span>{scheduleLabel}</span>
+                          </div>
+                        )}
+
                         {/* Pickup & Destination */}
                         <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1.5">
                           <h3 className="font-display text-base font-bold text-zinc-900">
@@ -1082,6 +1114,11 @@ export function CourierBoard({
                               : `${order.packageCount} pacote(s)`}{' '}
                             · {formatPaymentMethodLabel(order.paymentMethod)}
                           </p>
+                          {order.flowDirection === 'receber' && (
+                            <p className="text-[11px] font-medium text-sky-800">
+                              Retirada em terceiros · Entrega ao solicitante
+                            </p>
+                          )}
                         </div>
 
                         {order.type === 'frete' && order.freightDetails && (

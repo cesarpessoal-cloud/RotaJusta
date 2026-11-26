@@ -4,10 +4,13 @@ import {
   CargoSize,
   DeliveryStop,
   Order,
+  OrderFlowDirection,
   OrderStatus,
   OrderType,
   PaymentStatus,
   PersonType,
+  PickupSchedule,
+  PickupScheduleMode,
   PixPaymentMethod,
   Profile,
   PropulsionType,
@@ -303,10 +306,32 @@ function normalizeOrderFromRows(
   const uidMatch = rawSource.match(/\[UID:([a-zA-Z0-9-]+)\]/);
   const extractedMerchantId = uidMatch?.[1] || '';
 
+  const dirMatch = rawSource.match(/\[DIR:(enviar|receber)\]/);
+  const extractedFlowDirection: OrderFlowDirection | undefined =
+    dirMatch?.[1] === 'receber'
+      ? 'receber'
+      : dirMatch?.[1] === 'enviar'
+      ? 'enviar'
+      : undefined;
+
+  const agdMatch = rawSource.match(/\[AGD:([^|\]]*)\|([^|\]]*)\|([^\]]*)\]/);
+  let extractedSchedule: PickupSchedule | undefined;
+  if (agdMatch) {
+    const mode: PickupScheduleMode =
+      agdMatch[1] === 'agendada' ? 'agendada' : 'imediata';
+    extractedSchedule = {
+      mode,
+      readyAt: agdMatch[2] || undefined,
+      deadlineAt: agdMatch[3] || undefined,
+    };
+  }
+
   const cleanMerchantName =
     rawSource
       .replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '')
       .replace(/\s*\[UID:[a-zA-Z0-9-]+\]/g, '')
+      .replace(/\s*\[DIR:(?:enviar|receber)\]/g, '')
+      .replace(/\s*\[AGD:[^\]]*\]/g, '')
       .trim() || 'Lojista Porto Alegre';
 
   let merchantProfile = extractedMerchantId
@@ -344,6 +369,8 @@ function normalizeOrderFromRows(
     id: row.id,
     code: formatDeliveryCode(row.id),
     type: row.type,
+    flowDirection: extractedFlowDirection,
+    pickupSchedule: extractedSchedule,
     merchantId: merchantProfile?.id || extractedMerchantId || '',
     merchantName: cleanMerchantName,
     merchantRatingAvg: merchantProfile?.ratingAvg,
@@ -1277,9 +1304,21 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
   const baseName = order.merchantName || 'Painel do Lojista';
   const hasValidMerchantId =
     Boolean(order.merchantId) && order.merchantId !== 'lojista-supabase';
-  const sourceChannelWithUid = hasValidMerchantId
-    ? `${baseName} [UID:${order.merchantId}]`
-    : baseName;
+
+  const sourceTags: string[] = [];
+  if (hasValidMerchantId) {
+    sourceTags.push(`[UID:${order.merchantId}]`);
+  }
+  if (order.flowDirection === 'receber') {
+    sourceTags.push('[DIR:receber]');
+  }
+  if (order.pickupSchedule && order.pickupSchedule.mode === 'agendada') {
+    const ready = order.pickupSchedule.readyAt || '';
+    const deadline = order.pickupSchedule.deadlineAt || '';
+    sourceTags.push(`[AGD:agendada|${ready}|${deadline}]`);
+  }
+  const sourceChannelWithTags =
+    sourceTags.length > 0 ? `${baseName} ${sourceTags.join(' ')}` : baseName;
 
   const basePayload = {
     type: order.type,
@@ -1298,7 +1337,7 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     payment_status: 'pendente_pagamento' as PaymentStatus,
     driver_id: null,
     driver_name: null,
-    source_channel: sourceChannelWithUid,
+    source_channel: sourceChannelWithTags,
   };
 
   let { data: insertedDelivery, error: deliveryError } = await supabase

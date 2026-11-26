@@ -30,6 +30,16 @@ export type PaymentStatus = 'pendente_pagamento' | 'pago_lojista' | 'repassado';
 
 export type PersonType = 'PF' | 'PJ';
 
+export type OrderFlowDirection = 'enviar' | 'receber';
+
+export type PickupScheduleMode = 'imediata' | 'agendada';
+
+export interface PickupSchedule {
+  mode: PickupScheduleMode;
+  readyAt?: string;
+  deadlineAt?: string;
+}
+
 export interface FreightDetails {
   cargoDescription: string;
   cargoSize: CargoSize;
@@ -96,6 +106,8 @@ export interface Order {
   id: string;
   code: string;
   type: OrderType;
+  flowDirection?: OrderFlowDirection;
+  pickupSchedule?: PickupSchedule;
   merchantId: string;
   merchantName: string;
   merchantRatingAvg?: number;

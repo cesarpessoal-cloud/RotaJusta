@@ -44,7 +44,13 @@ import {
   updatePixKeyInSupabase,
   updateProfileStatusInSupabase,
 } from './lib/supabaseService';
-import { ApprovalStatus, Order, Profile, Rating } from './types';
+import {
+  ApprovalStatus,
+  Order,
+  OrderFlowDirection,
+  Profile,
+  Rating,
+} from './types';
 import { formatBRL, getCourierSettlementForOrder } from './utils/pricing';
 import {
   playRotaJustaAlert,
@@ -60,6 +66,8 @@ export default function App() {
   const [authInitialTab, setAuthInitialTab] = useState<AuthTab>('entrar');
   const [authInitialRegChoice, setAuthInitialRegChoice] =
     useState<RegProfileChoice>('pf_solicitante');
+  const [pendingFlowDirection, setPendingFlowDirection] =
+    useState<OrderFlowDirection>('enviar');
   const [landingOnlineCouriersCount, setLandingOnlineCouriersCount] =
     useState<number>(0);
   const [isLoadingOnlineCount, setIsLoadingOnlineCount] =
@@ -512,6 +520,7 @@ export default function App() {
   const handleLogout = () => {
     setCurrentUser(null);
     setUnauthView('landing');
+    setPendingFlowDirection('enviar');
     setAdminView('admin');
     setIsAccountModalOpen(false);
     setProfiles([]);
@@ -529,9 +538,13 @@ export default function App() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
-  const handleOpenRegister = (presetChoice: RegProfileChoice) => {
+  const handleOpenRegister = (
+    presetChoice: RegProfileChoice,
+    presetFlow: OrderFlowDirection = 'enviar'
+  ) => {
     setAuthInitialTab('cadastrar');
     setAuthInitialRegChoice(presetChoice);
+    setPendingFlowDirection(presetFlow);
     setUnauthView('auth');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -1308,6 +1321,7 @@ export default function App() {
               <MerchantPanel
                 lockedMerchant={currentUser}
                 currentEvaluatorId={currentUser.id}
+                initialFlowDirection={pendingFlowDirection}
                 orders={orders}
                 merchants={merchants}
                 onlineCouriers={onlineCouriers}
@@ -1368,6 +1382,7 @@ export default function App() {
             {isAdmin && adminView === 'lojista' && (
               <MerchantPanel
                 currentEvaluatorId={activeMerchantId || currentUser.id}
+                initialFlowDirection={pendingFlowDirection}
                 orders={orders}
                 merchants={merchants}
                 onlineCouriers={onlineCouriers}

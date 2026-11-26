@@ -1,5 +1,7 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowRightLeft,
+  CalendarClock,
   Camera,
   Check,
   CheckCircle2,
@@ -8,9 +10,11 @@ import {
   Copy,
   MapPin,
   Package,
+  PackageCheck,
   Plus,
   QrCode,
   Search,
+  Send,
   Sparkles,
   Trash2,
   Truck,
@@ -32,8 +36,11 @@ import {
   CargoSize,
   DeliveryStop,
   Order,
+  OrderFlowDirection,
   OrderStatus,
   OrderType,
+  PickupSchedule,
+  PickupScheduleMode,
   PixPaymentMethod,
   Profile,
   Rating,
@@ -47,6 +54,11 @@ import {
   PRICING_RULES,
 } from '../utils/pricing';
 import {
+  formatPickupScheduleLabel,
+  getTodayDateInputValue,
+  getTomorrowDateInputValue,
+} from '../utils/schedule';
+import {
   EvBadge,
   FreightBadge,
   OrderStatusBadge,
@@ -59,6 +71,7 @@ import { OrderRatingBox, RatingBadge } from './RatingWidgets';
 interface MerchantPanelProps {
   lockedMerchant?: Profile;
   currentEvaluatorId?: string;
+  initialFlowDirection?: OrderFlowDirection;
   orders: Order[];
   merchants: Profile[];
   onlineCouriers: Profile[];
@@ -106,6 +119,7 @@ function createEmptyStopDraft(neighborhood = 'Cidade Baixa'): RouteStopDraft {
 export function MerchantPanel({
   lockedMerchant,
   currentEvaluatorId,
+  initialFlowDirection = 'enviar',
   orders,
   merchants,
   onlineCouriers,
@@ -128,29 +142,77 @@ export function MerchantPanel({
 
   const evaluatorId = currentEvaluatorId || activeMerchant?.id || '';
 
+  const [flowDirection, setFlowDirection] = useState<OrderFlowDirection>(
+    initialFlowDirection
+  );
   const [orderType, setOrderType] = useState<OrderType>('rapida');
   const [paymentMethod, setPaymentMethod] =
     useState<PixPaymentMethod>('pix_direto');
-  const [pickupAddr, setPickupAddr] = useState<StructuredAddressValue>(() =>
+
+  const buildUserAddress = (merchant?: Profile): StructuredAddressValue =>
     parseFullAddressLine(
-      activeMerchant?.address || 'Rua dos Andradas, 1234',
-      activeMerchant?.neighborhood || 'Centro Histórico'
-    )
+      merchant?.address || 'Rua dos Andradas, 1234',
+      merchant?.neighborhood || 'Centro Histórico'
+    );
+
+  const buildDefaultThirdPartyAddress = (): StructuredAddressValue =>
+    parseFullAddressLine('Av. Getúlio Vargas, 890', 'Menino Deus');
+
+  const [pickupAddr, setPickupAddr] = useState<StructuredAddressValue>(() =>
+    initialFlowDirection === 'receber'
+      ? buildDefaultThirdPartyAddress()
+      : buildUserAddress(activeMerchant)
   );
 
   // Entrega Rápida & Pequeno Frete shared destination fields
   const [destAddr, setDestAddr] = useState<StructuredAddressValue>(() =>
-    parseFullAddressLine('Av. Getúlio Vargas, 890', 'Menino Deus')
+    initialFlowDirection === 'receber'
+      ? buildUserAddress(activeMerchant)
+      : buildDefaultThirdPartyAddress()
   );
-  const [singleRecipientName, setSingleRecipientName] = useState<string>(
-    'Marcos Teixeira'
+
+  const thirdPartyRecipientRef = useRef<{ name: string; note: string }>({
+    name: 'Marcos Teixeira',
+    note: 'Interfone 42 · Entregar na portaria',
+  });
+
+  const buildSelfRecipientName = (merchant?: Profile) =>
+    merchant?.businessName || merchant?.name || 'Você (Destinatário)';
+
+  const buildSelfRecipientNote = (merchant?: Profile) =>
+    merchant?.phone
+      ? `Destinatário cadastrado · Tel: ${merchant.phone}`
+      : 'Entregar ao solicitante cadastrado';
+
+  const [singleRecipientName, setSingleRecipientName] = useState<string>(() =>
+    initialFlowDirection === 'receber'
+      ? buildSelfRecipientName(activeMerchant)
+      : 'Marcos Teixeira'
   );
-  const [recipientNote, setRecipientNote] = useState<string>(
-    'Interfone 42 · Entregar na portaria'
+  const [recipientNote, setRecipientNote] = useState<string>(() =>
+    initialFlowDirection === 'receber'
+      ? buildSelfRecipientNote(activeMerchant)
+      : 'Interfone 42 · Entregar na portaria'
   );
   const [distanceKm, setDistanceKm] = useState<number>(4.5);
   const [distanceAutoCalculated, setDistanceAutoCalculated] =
     useState<boolean>(false);
+
+  // Agendamento e Prazo Limite de Retirada (Rotas Consolidadas & PJ)
+  const [scheduleMode, setScheduleMode] =
+    useState<PickupScheduleMode>('imediata');
+  const [readyDate, setReadyDate] = useState<string>(() =>
+    getTomorrowDateInputValue()
+  );
+  const [readyTime, setReadyTime] = useState<string>('09:00');
+  const [deadlineDate, setDeadlineDate] = useState<string>(() =>
+    getTomorrowDateInputValue()
+  );
+  const [deadlineTime, setDeadlineTime] = useState<string>('14:00');
+  const [useImmediateDeadline, setUseImmediateDeadline] =
+    useState<boolean>(false);
+  const [immediateDeadlineTime, setImmediateDeadlineTime] =
+    useState<string>('17:30');
 
   // Pequeno Frete specific fields
   const [cargoDescription, setCargoDescription] = useState<string>(
@@ -280,6 +342,57 @@ export function MerchantPanel({
     }
   };
 
+  const applyFlowDirectionSwitch = (
+    nextDir: OrderFlowDirection,
+    scrollToForm = false
+  ) => {
+    setFormError('');
+    if (nextDir !== flowDirection) {
+      if (nextDir === 'receber') {
+        thirdPartyRecipientRef.current = {
+          name: singleRecipientName,
+          note: recipientNote,
+        };
+        const currentPickup = pickupAddr;
+        const currentDest = destAddr;
+        setPickupAddr(currentDest);
+        setDestAddr(
+          currentPickup.street.trim()
+            ? currentPickup
+            : buildUserAddress(activeMerchant)
+        );
+        setSingleRecipientName(buildSelfRecipientName(activeMerchant));
+        setRecipientNote(buildSelfRecipientNote(activeMerchant));
+        if (orderType === 'rota') {
+          setOrderType('rapida');
+        }
+      } else {
+        const currentPickup = pickupAddr;
+        const currentDest = destAddr;
+        setPickupAddr(
+          currentDest.street.trim()
+            ? currentDest
+            : buildUserAddress(activeMerchant)
+        );
+        setDestAddr(currentPickup);
+        setSingleRecipientName(thirdPartyRecipientRef.current.name);
+        setRecipientNote(thirdPartyRecipientRef.current.note);
+      }
+      setFlowDirection(nextDir);
+    }
+
+    if (scrollToForm && formRef?.current) {
+      formRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  useEffect(() => {
+    if (initialFlowDirection !== flowDirection) {
+      applyFlowDirectionSwitch(initialFlowDirection, false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialFlowDirection]);
+
   const handleOrderTypeChange = (nextType: OrderType) => {
     setOrderType(nextType);
     setFormError('');
@@ -292,12 +405,14 @@ export function MerchantPanel({
     onSelectMerchant(id);
     const chosen = merchants.find((m) => m.id === id);
     if (chosen) {
-      setPickupAddr(
-        parseFullAddressLine(
-          chosen.address || formatFullAddressLine(pickupAddr),
-          chosen.neighborhood || 'Centro Histórico'
-        )
-      );
+      const nextOwn = buildUserAddress(chosen);
+      if (flowDirection === 'receber') {
+        setDestAddr(nextOwn);
+        setSingleRecipientName(buildSelfRecipientName(chosen));
+        setRecipientNote(buildSelfRecipientNote(chosen));
+      } else {
+        setPickupAddr(nextOwn);
+      }
     }
   };
 
@@ -435,6 +550,45 @@ export function MerchantPanel({
     routeStops,
   ]);
 
+  const showSchedulingSection =
+    orderType === 'rota' || activeMerchant?.personType !== 'PF';
+
+  const schedulePreviewLabel = useMemo(() => {
+    if (!showSchedulingSection) return null;
+    if (scheduleMode === 'agendada') {
+      return formatPickupScheduleLabel({
+        mode: 'agendada',
+        readyAt: `${readyDate}T${readyTime}`,
+        deadlineAt: `${deadlineDate}T${deadlineTime}`,
+      });
+    }
+    if (useImmediateDeadline && immediateDeadlineTime) {
+      return formatPickupScheduleLabel({
+        mode: 'imediata',
+        deadlineAt: `${getTodayDateInputValue()}T${immediateDeadlineTime}`,
+      });
+    }
+    return 'Retirada imediata (Hoje) · Disponível agora';
+  }, [
+    showSchedulingSection,
+    scheduleMode,
+    readyDate,
+    readyTime,
+    deadlineDate,
+    deadlineTime,
+    useImmediateDeadline,
+    immediateDeadlineTime,
+  ]);
+
+  const handleApplyTomorrowMorningPreset = () => {
+    const tomorrow = getTomorrowDateInputValue();
+    setScheduleMode('agendada');
+    setReadyDate(tomorrow);
+    setReadyTime('09:00');
+    setDeadlineDate(tomorrow);
+    setDeadlineTime('14:00');
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -442,6 +596,38 @@ export function MerchantPanel({
     if (!pickupAddr.street.trim()) {
       setFormError('Informe a rua e endereço de coleta em Porto Alegre.');
       return;
+    }
+
+    let pickupSchedule: PickupSchedule | undefined;
+    if (showSchedulingSection) {
+      if (scheduleMode === 'agendada') {
+        if (!readyDate || !readyTime || !deadlineDate || !deadlineTime) {
+          setFormError(
+            'Informe a data/horário de liberação e o prazo limite para retirada.'
+          );
+          return;
+        }
+        const readyMs = new Date(`${readyDate}T${readyTime}`).getTime();
+        const deadlineMs = new Date(`${deadlineDate}T${deadlineTime}`).getTime();
+        if (Number.isNaN(readyMs) || Number.isNaN(deadlineMs) || deadlineMs <= readyMs) {
+          setFormError(
+            'O prazo limite para retirada deve ser posterior à data e horário de liberação.'
+          );
+          return;
+        }
+        pickupSchedule = {
+          mode: 'agendada',
+          readyAt: `${readyDate}T${readyTime}`,
+          deadlineAt: `${deadlineDate}T${deadlineTime}`,
+        };
+      } else if (useImmediateDeadline && immediateDeadlineTime) {
+        pickupSchedule = {
+          mode: 'imediata',
+          deadlineAt: `${getTodayDateInputValue()}T${immediateDeadlineTime}`,
+        };
+      } else {
+        pickupSchedule = { mode: 'imediata' };
+      }
     }
 
     let stops: DeliveryStop[] = [];
@@ -538,6 +724,8 @@ export function MerchantPanel({
       id: crypto.randomUUID(),
       code: `RJ-${nextNumber}`,
       type: orderType,
+      flowDirection,
+      pickupSchedule,
       merchantId: activeMerchant?.id || '',
       merchantName:
         activeMerchant?.businessName ||
@@ -679,12 +867,85 @@ export function MerchantPanel({
         </div>
       </section>
 
+      {/* Atalhos Intuitivos: Quero enviar um item vs Quero receber um item */}
+      <section aria-label="Ações rápidas do solicitante" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => applyFlowDirectionSwitch('enviar', true)}
+          className={`flex items-start gap-3.5 rounded-2xl border-2 p-4 text-left transition-all ${
+            flowDirection === 'enviar'
+              ? 'border-emerald-600 bg-emerald-50/70 shadow-xs'
+              : 'border-zinc-200 bg-white hover:border-emerald-300 hover:bg-zinc-50'
+          }`}
+        >
+          <div
+            className={`flex h-11 w-11 items-center justify-center rounded-xl shrink-0 ${
+              flowDirection === 'enviar'
+                ? 'bg-emerald-600 text-white'
+                : 'bg-zinc-100 text-zinc-700'
+            }`}
+          >
+            <Send className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="font-display text-sm sm:text-base font-bold text-zinc-950">
+                Quero enviar um item
+              </span>
+              {flowDirection === 'enviar' && (
+                <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
+                  Ativo
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-600 leading-relaxed">
+              Coleta no seu endereço cadastrado e entrega no destino do cliente ou destinatário.
+            </p>
+          </div>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => applyFlowDirectionSwitch('receber', true)}
+          className={`flex items-start gap-3.5 rounded-2xl border-2 p-4 text-left transition-all ${
+            flowDirection === 'receber'
+              ? 'border-sky-600 bg-sky-50/70 shadow-xs'
+              : 'border-zinc-200 bg-white hover:border-sky-300 hover:bg-zinc-50'
+          }`}
+        >
+          <div
+            className={`flex h-11 w-11 items-center justify-center rounded-xl shrink-0 ${
+              flowDirection === 'receber'
+                ? 'bg-sky-600 text-white'
+                : 'bg-zinc-100 text-zinc-700'
+            }`}
+          >
+            <PackageCheck className="h-5 w-5" aria-hidden="true" />
+          </div>
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="font-display text-sm sm:text-base font-bold text-zinc-950">
+                Quero receber um item
+              </span>
+              {flowDirection === 'receber' && (
+                <span className="rounded bg-sky-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
+                  Ativo
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-zinc-600 leading-relaxed">
+              Retirada no endereço de terceiros e entrega no seu endereço (com seus dados já preenchidos).
+            </p>
+          </div>
+        </button>
+      </section>
+
       {/* Form + Live Map Preview & Transparent Pricing Breakdown */}
       <section className="grid grid-cols-1 gap-6 lg:grid-cols-12 items-start">
         <form
           ref={formRef}
           onSubmit={handleSubmit}
-          className="lg:col-span-7 rounded-xl border border-zinc-200 bg-white p-5 sm:p-6 space-y-5"
+          className="lg:col-span-7 rounded-xl border border-zinc-200 bg-white p-5 sm:p-6 space-y-5 scroll-mt-24"
         >
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-zinc-100 pb-4">
             <div>
@@ -788,32 +1049,76 @@ export function MerchantPanel({
             )}
           </div>
 
+          {/* Visual Flow Direction Context Banner */}
+          {flowDirection === 'receber' && (
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between rounded-xl border border-sky-200 bg-sky-50 px-3.5 py-2.5 text-xs text-sky-950">
+              <div className="flex items-start gap-2">
+                <ArrowRightLeft
+                  className="h-4 w-4 text-sky-700 shrink-0 mt-0.5"
+                  aria-hidden="true"
+                />
+                <span>
+                  <strong>Modo Receber Item:</strong> o entregador retira no
+                  endereço de terceiros abaixo e entrega para você no seu
+                  endereço cadastrado.
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => applyFlowDirectionSwitch('enviar', false)}
+                className="font-semibold text-sky-800 underline underline-offset-2 hover:text-sky-950 self-start sm:self-center shrink-0"
+              >
+                Mudar para Enviar
+              </button>
+            </div>
+          )}
+
           {/* Pickup Details */}
-          <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4">
+          <div
+            className={`rounded-xl border p-4 ${
+              flowDirection === 'receber'
+                ? 'border-sky-200 bg-sky-50/40'
+                : 'border-zinc-200 bg-zinc-50/60'
+            }`}
+          >
             <AddressAutocompleteFields
               idPrefix="pickup"
               sectionLabel={
-                orderType === 'frete'
-                  ? 'Origem da Carga / Coleta (CEP ou Busca Inteligente)'
-                  : 'Endereço de Coleta (CEP ou Busca Inteligente)'
+                flowDirection === 'receber'
+                  ? '1. Endereço de Retirada de Terceiros (Onde buscar)'
+                  : orderType === 'frete'
+                  ? '1. Origem da Carga / Coleta (Seu Endereço)'
+                  : '1. Endereço de Coleta (Seu Endereço)'
               }
               value={pickupAddr}
               onChange={handlePickupChange}
-              streetPlaceholder="Ex: Rua dos Andradas"
-              complementPlaceholder="Ex: Loja 2 / Fundos"
+              streetPlaceholder={
+                flowDirection === 'receber'
+                  ? 'Ex: Rua onde o item será retirado'
+                  : 'Ex: Rua dos Andradas'
+              }
+              complementPlaceholder="Ex: Loja 2 / Fundos / Portaria"
             />
           </div>
 
           {/* Service-specific fields */}
           {orderType === 'rapida' || orderType === 'frete' ? (
             <div className="space-y-4 border-t border-zinc-100 pt-4">
-              <div className="rounded-xl border border-zinc-200 bg-zinc-50/60 p-4">
+              <div
+                className={`rounded-xl border p-4 ${
+                  flowDirection === 'receber'
+                    ? 'border-emerald-200 bg-emerald-50/40'
+                    : 'border-zinc-200 bg-zinc-50/60'
+                }`}
+              >
                 <AddressAutocompleteFields
                   idPrefix="dest"
                   sectionLabel={
-                    orderType === 'frete'
-                      ? 'Destino do Pequeno Frete (CEP ou Busca Inteligente)'
-                      : 'Endereço de Entrega (CEP ou Busca Inteligente)'
+                    flowDirection === 'receber'
+                      ? '2. Endereço de Entrega para Você (Seu Cadastro)'
+                      : orderType === 'frete'
+                      ? '2. Destino do Pequeno Frete (CEP ou Busca Inteligente)'
+                      : '2. Endereço de Entrega (Destinatário)'
                   }
                   value={destAddr}
                   onChange={handleDestChange}
@@ -858,9 +1163,18 @@ export function MerchantPanel({
                 <div className="sm:col-span-2">
                   <label
                     htmlFor="single-recipient"
-                    className="block text-xs font-semibold text-zinc-700 mb-1.5"
+                    className="flex items-center justify-between gap-2 text-xs font-semibold text-zinc-700 mb-1.5"
                   >
-                    Nome do Recebedor
+                    <span>
+                      {flowDirection === 'receber'
+                        ? 'Destinatário (Você)'
+                        : 'Nome do Recebedor'}
+                    </span>
+                    {flowDirection === 'receber' && (
+                      <span className="text-[10px] font-semibold text-emerald-700">
+                        Preenchido com seus dados
+                      </span>
+                    )}
                   </label>
                   <input
                     id="single-recipient"
@@ -1100,6 +1414,153 @@ export function MerchantPanel({
                 <Plus className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
                 <span>Adicionar Parada</span>
               </button>
+            </div>
+          )}
+
+          {/* Agendamento e Prazo Limite de Retirada (Rotas Consolidadas e Pedidos PJ) */}
+          {showSchedulingSection && (
+            <div className="border-t border-zinc-100 pt-4 space-y-3">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                <span className="flex items-center gap-1.5 text-xs font-semibold text-zinc-800">
+                  <CalendarClock
+                    className="h-4 w-4 text-emerald-600 shrink-0"
+                    aria-hidden="true"
+                  />
+                  <span>Agendamento e Prazo Limite de Retirada</span>
+                </span>
+                <button
+                  type="button"
+                  onClick={handleApplyTomorrowMorningPreset}
+                  className="self-start sm:self-auto text-[11px] font-semibold text-emerald-700 hover:underline"
+                >
+                  Atalho: Amanhã (09:00 → 14:00)
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('imediata')}
+                  className={`rounded-xl border p-3 text-left transition-colors ${
+                    scheduleMode === 'imediata'
+                      ? 'border-emerald-600 bg-emerald-50/70 text-emerald-950'
+                      : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                  }`}
+                >
+                  <p className="text-xs font-semibold">
+                    Retirada Imediata (Hoje)
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-zinc-500">
+                    Pacotes já prontos ou liberação imediata para hoje
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setScheduleMode('agendada')}
+                  className={`rounded-xl border p-3 text-left transition-colors ${
+                    scheduleMode === 'agendada'
+                      ? 'border-emerald-600 bg-emerald-50/70 text-emerald-950'
+                      : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                  }`}
+                >
+                  <p className="text-xs font-semibold">
+                    Agendar Retirada (Dia Seguinte / Data Específica)
+                  </p>
+                  <p className="mt-0.5 text-[11px] text-zinc-500">
+                    Defina quando os pacotes estarão prontos e o prazo máximo
+                  </p>
+                </button>
+              </div>
+
+              {scheduleMode === 'imediata' ? (
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3 flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between">
+                  <label className="flex items-center gap-2 text-xs text-zinc-700 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={useImmediateDeadline}
+                      onChange={(e) => setUseImmediateDeadline(e.target.checked)}
+                      className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600"
+                    />
+                    <span>Informar horário limite de retirada hoje (ex: fechamento da loja)</span>
+                  </label>
+                  {useImmediateDeadline && (
+                    <div className="flex items-center gap-2 shrink-0">
+                      <label
+                        htmlFor="immediate-deadline-time"
+                        className="text-xs font-medium text-zinc-600"
+                      >
+                        Até:
+                      </label>
+                      <input
+                        id="immediate-deadline-time"
+                        type="time"
+                        value={immediateDeadlineTime}
+                        onChange={(e) => setImmediateDeadlineTime(e.target.value)}
+                        className="rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 font-mono text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3.5 space-y-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <span className="block text-xs font-semibold text-zinc-800">
+                        Data e Horário de Liberação
+                      </span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          aria-label="Data de liberação"
+                          type="date"
+                          value={readyDate}
+                          onChange={(e) => setReadyDate(e.target.value)}
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                        />
+                        <input
+                          aria-label="Horário de liberação"
+                          type="time"
+                          value={readyTime}
+                          onChange={(e) => setReadyTime(e.target.value)}
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 font-mono text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <span className="block text-xs font-semibold text-zinc-800">
+                        Prazo Limite para Retirada
+                      </span>
+                      <div className="grid grid-cols-2 gap-2">
+                        <input
+                          aria-label="Data limite para retirada"
+                          type="date"
+                          value={deadlineDate}
+                          onChange={(e) => setDeadlineDate(e.target.value)}
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                        />
+                        <input
+                          aria-label="Horário limite para retirada"
+                          type="time"
+                          value={deadlineTime}
+                          onChange={(e) => setDeadlineTime(e.target.value)}
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-2.5 py-2 font-mono text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  {schedulePreviewLabel && (
+                    <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-950">
+                      <CalendarClock
+                        className="h-3.5 w-3.5 text-amber-700 shrink-0"
+                        aria-hidden="true"
+                      />
+                      <span>Prévia no mural: {schedulePreviewLabel}</span>
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -1385,6 +1846,9 @@ export function MerchantPanel({
             {filteredOrders.map((order) => {
               const deliveredStops = order.stops.filter((s) => s.delivered).length;
               const isExpanded = expandedOrderId === order.id;
+              const orderScheduleLabel = formatPickupScheduleLabel(
+                order.pickupSchedule
+              );
 
               return (
                 <div
@@ -1407,6 +1871,11 @@ export function MerchantPanel({
                               : `Rota Consolidada (${order.packageCount} pacotes)`}
                           </span>
                         )}
+                        {order.flowDirection === 'receber' && (
+                          <span className="rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[11px] font-semibold text-sky-800">
+                            Receber Item
+                          </span>
+                        )}
                         <span aria-hidden="true">·</span>
                         <span>{order.merchantName}</span>
                         <span aria-hidden="true">·</span>
@@ -1419,6 +1888,16 @@ export function MerchantPanel({
                         {order.pickupNeighborhood} ({order.pickupAddress}) →{' '}
                         {order.destinationNeighborhood}
                       </p>
+
+                      {orderScheduleLabel && (
+                        <p className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900">
+                          <CalendarClock
+                            className="h-3.5 w-3.5 text-amber-700 shrink-0"
+                            aria-hidden="true"
+                          />
+                          <span>{orderScheduleLabel}</span>
+                        </p>
+                      )}
 
                       {order.type === 'frete' && order.freightDetails && (
                         <p className="text-xs text-zinc-600">
