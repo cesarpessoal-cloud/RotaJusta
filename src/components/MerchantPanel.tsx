@@ -36,6 +36,7 @@ import {
   OrderType,
   PixPaymentMethod,
   Profile,
+  Rating,
 } from '../types';
 import { formatPaymentMethodLabel } from '../utils/pix';
 import {
@@ -53,11 +54,15 @@ import {
   PropulsionTag,
 } from './EvBadge';
 import { MapStopPoint, PortoAlegreMap } from './PortoAlegreMap';
+import { OrderRatingBox, RatingBadge } from './RatingWidgets';
 
 interface MerchantPanelProps {
   lockedMerchant?: Profile;
+  currentEvaluatorId?: string;
   orders: Order[];
   merchants: Profile[];
+  onlineCouriers: Profile[];
+  ratings: Rating[];
   activeMerchantId: string;
   platformPixKey: string | null;
   onSelectMerchant: (id: string) => void;
@@ -65,6 +70,13 @@ interface MerchantPanelProps {
     newOrder: Order
   ) => Promise<{ order: Order | null; errorMessage?: string }>;
   onConfirmPixPayment: (orderId: string) => Promise<void>;
+  onSubmitRating: (params: {
+    deliveryId: string;
+    fromProfileId: string;
+    toProfileId: string;
+    stars: number;
+    comment?: string;
+  }) => Promise<void>;
   formRef?: React.RefObject<HTMLFormElement | null>;
 }
 
@@ -93,13 +105,17 @@ function createEmptyStopDraft(neighborhood = 'Cidade Baixa'): RouteStopDraft {
 
 export function MerchantPanel({
   lockedMerchant,
+  currentEvaluatorId,
   orders,
   merchants,
+  onlineCouriers,
+  ratings,
   activeMerchantId,
   platformPixKey,
   onSelectMerchant,
   onCreateOrder,
   onConfirmPixPayment,
+  onSubmitRating,
   formRef,
 }: MerchantPanelProps) {
   const activeMerchant = useMemo(
@@ -109,6 +125,8 @@ export function MerchantPanel({
       merchants[0],
     [lockedMerchant, merchants, activeMerchantId]
   );
+
+  const evaluatorId = currentEvaluatorId || activeMerchant?.id || '';
 
   const [orderType, setOrderType] = useState<OrderType>('rapida');
   const [paymentMethod, setPaymentMethod] =
@@ -614,6 +632,29 @@ export function MerchantPanel({
             </strong>{' '}
             com repasse transparente e taxa zerada para veículos elétricos.
           </p>
+          <div className="pt-1 flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                onlineCouriers.length > 0
+                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                  : 'border-zinc-200 bg-zinc-100 text-zinc-600'
+              }`}
+            >
+              <span
+                className={`h-2 w-2 rounded-full ${
+                  onlineCouriers.length > 0
+                    ? 'bg-emerald-500 animate-pulse'
+                    : 'bg-zinc-400'
+                }`}
+                aria-hidden="true"
+              />
+              <span>
+                {onlineCouriers.length > 0
+                  ? `${onlineCouriers.length} entregador(es) ONLINE agora em Porto Alegre`
+                  : 'Nenhum entregador online no momento em Porto Alegre'}
+              </span>
+            </span>
+          </div>
         </div>
 
         <div className="grid grid-cols-3 gap-4 border border-zinc-200 bg-white px-4 py-3 rounded-xl shrink-0">
@@ -1137,7 +1178,7 @@ export function MerchantPanel({
         </form>
 
         {/* Right Column: Live Porto Alegre Map + Transparent Pricing */}
-        <aside className="lg:col-span-5 space-y-5">
+        <aside className="lg:col-span-5 space-y-5 lg:sticky lg:top-20">
           <PortoAlegreMap
             pickup={previewPickup}
             stops={previewStops}
@@ -1402,6 +1443,11 @@ export function MerchantPanel({
                               {order.assignedCourierName}
                             </strong>
                           </span>
+                          <RatingBadge
+                            avg={order.assignedCourierRatingAvg}
+                            count={order.assignedCourierRatingCount}
+                            compact
+                          />
                           <PropulsionTag propulsion={order.assignedCourierPropulsion} />
                           <span aria-hidden="true">·</span>
                           <span className="font-mono tabular-nums">
@@ -1640,6 +1686,36 @@ export function MerchantPanel({
                           </div>
                         </div>
                       )}
+                    </div>
+                  )}
+
+                  {/* Mutual Rating Box after Delivery Completed */}
+                  {order.status === 'Entregue' && (
+                    <div className="mt-3">
+                      <OrderRatingBox
+                        buttonLabel="Avaliar Entregador"
+                        targetName={order.assignedCourierName || 'Entregador'}
+                        commentPlaceholder="Comentário opcional: pontualidade, educação e cuidado com a carga..."
+                        existingRating={ratings.find(
+                          (r) =>
+                            r.deliveryId === order.id &&
+                            r.fromProfileId === evaluatorId
+                        )}
+                        canRate={Boolean(
+                          evaluatorId && order.assignedCourierId
+                        )}
+                        unavailableNote="Avaliação disponível quando condutor e solicitante estiverem vinculados."
+                        onSubmit={async (stars, comment) => {
+                          if (!evaluatorId || !order.assignedCourierId) return;
+                          await onSubmitRating({
+                            deliveryId: order.id,
+                            fromProfileId: evaluatorId,
+                            toProfileId: order.assignedCourierId,
+                            stars,
+                            comment,
+                          });
+                        }}
+                      />
                     </div>
                   )}
 

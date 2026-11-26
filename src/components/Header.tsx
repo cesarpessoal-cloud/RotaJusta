@@ -1,6 +1,7 @@
 import { LogOut, Route, Shield, ShieldCheck, UserCog } from 'lucide-react';
 import { Profile } from '../types';
 import { PropulsionTag } from './EvBadge';
+import { PWAInstallButton } from './PWAInstallButton';
 
 export type AdminSupervisionView = 'admin' | 'lojista' | 'entregador';
 
@@ -122,6 +123,8 @@ export function Header({
               )}
             </div>
           </div>
+
+          <PWAInstallButton compact />
 
           <button
             type="button"

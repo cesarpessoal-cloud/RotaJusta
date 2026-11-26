@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   Bike,
   Building2,
   CheckCircle2,
@@ -19,6 +20,7 @@ import {
   UserPlus,
   Zap,
 } from 'lucide-react';
+import { PWAInstallButton } from './PWAInstallButton';
 import {
   insertProfileInSupabase,
   loginWithPhoneAndPin,
@@ -47,6 +49,12 @@ import {
   VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
 
+export type AuthTab = 'entrar' | 'cadastrar';
+export type RegProfileChoice =
+  | 'pf_solicitante'
+  | 'pj_lojista'
+  | 'pf_entregador';
+
 interface AuthScreenProps {
   onLoginSuccess: (profile: Profile) => void;
   isDatabaseEmpty: boolean;
@@ -55,10 +63,10 @@ interface AuthScreenProps {
   dbError: string | null;
   onSeedTestData: () => Promise<void>;
   onRetryConnection: () => Promise<void>;
+  initialTab?: AuthTab;
+  initialRegChoice?: RegProfileChoice;
+  onBackToLanding?: () => void;
 }
-
-type AuthTab = 'entrar' | 'cadastrar';
-type RegProfileChoice = 'pf_solicitante' | 'pj_lojista' | 'pf_entregador';
 
 export function AuthScreen({
   onLoginSuccess,
@@ -68,8 +76,11 @@ export function AuthScreen({
   dbError,
   onSeedTestData,
   onRetryConnection,
+  initialTab = 'entrar',
+  initialRegChoice = 'pf_solicitante',
+  onBackToLanding,
 }: AuthScreenProps) {
-  const [authTab, setAuthTab] = useState<AuthTab>('entrar');
+  const [authTab, setAuthTab] = useState<AuthTab>(initialTab);
 
   // Login form state
   const [loginIdentifier, setLoginIdentifier] = useState('');
@@ -86,7 +97,8 @@ export function AuthScreen({
   const [isVerifying2FA, setIsVerifying2FA] = useState(false);
 
   // Registration form state
-  const [regChoice, setRegChoice] = useState<RegProfileChoice>('pf_solicitante');
+  const [regChoice, setRegChoice] =
+    useState<RegProfileChoice>(initialRegChoice);
   const [regDocument, setRegDocument] = useState('');
   const [companyLegalName, setCompanyLegalName] = useState('');
   const [isLookingUpCnpj, setIsLookingUpCnpj] = useState(false);
@@ -109,6 +121,24 @@ export function AuthScreen({
   const [pixKey, setPixKey] = useState<string>('');
   const [isRegistering, setIsRegistering] = useState(false);
   const [regError, setRegError] = useState('');
+
+  useEffect(() => {
+    setAuthTab(initialTab);
+    setPendingProfile(null);
+    setBlockedProfile(null);
+    setTwoFactorProfile(null);
+    setLoginError('');
+    setRegError('');
+  }, [initialTab]);
+
+  useEffect(() => {
+    setRegChoice(initialRegChoice);
+    setRegDocument('');
+    setCompanyLegalName('');
+    setCnpjLookupStatus(null);
+    lastLookedUpCnpjRef.current = '';
+    setRegError('');
+  }, [initialRegChoice]);
 
   const regRole: 'lojista' | 'entregador' =
     regChoice === 'pf_entregador' ? 'entregador' : 'lojista';
@@ -657,6 +687,22 @@ export function AuthScreen({
   return (
     <div className="min-h-screen bg-zinc-50 flex flex-col justify-between px-4 py-8 sm:py-12">
       <div className="mx-auto w-full max-w-lg space-y-6 my-auto">
+        {onBackToLanding && (
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={onBackToLanding}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Voltar ao início</span>
+            </button>
+            <span className="text-[11px] font-medium text-zinc-500">
+              Porto Alegre · RS
+            </span>
+          </div>
+        )}
+
         {/* Brand Header */}
         <div className="text-center space-y-2">
           <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-600 text-white shadow-xs">
@@ -669,6 +715,9 @@ export function AuthScreen({
             Entregas urbanas, rotas e pequenos fretes com taxa fixa justa em{' '}
             <strong className="font-semibold text-zinc-800">Porto Alegre · RS</strong>
           </p>
+          <div className="flex justify-center pt-1">
+            <PWAInstallButton />
+          </div>
         </div>
 
         {dbError && (

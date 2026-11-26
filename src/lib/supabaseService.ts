@@ -11,6 +11,7 @@ import {
   PixPaymentMethod,
   Profile,
   PropulsionType,
+  Rating,
   UserRole,
   VehicleType,
 } from '../types';
@@ -26,7 +27,7 @@ export type DbStopStatus = 'pendente' | 'entregue';
 interface DbProfileRow {
   id: string;
   name: string;
-  phone: string;
+  phone?: string | null;
   email?: string | null;
   pix_key?: string | null;
   person_type?: string | null;
@@ -36,9 +37,22 @@ interface DbProfileRow {
   vehicle_type: string | null;
   propulsion: string | null;
   max_radius_km: number | null;
-  cnh_ear: boolean | null;
+  cnh_ear?: boolean | null;
   status: string;
   two_factor_enabled?: boolean | null;
+  rating_avg?: number | null;
+  rating_count?: number | null;
+  is_online?: boolean | null;
+  created_at?: string | null;
+}
+
+interface DbRatingRow {
+  id: string;
+  delivery_id: string;
+  from_profile_id: string;
+  to_profile_id: string;
+  stars: number;
+  comment: string | null;
   created_at?: string | null;
 }
 
@@ -95,7 +109,13 @@ export function mapApprovalToDbStatus(status: ApprovalStatus): DbApprovalStatus 
 export function mapDbStatusToOrderStatus(status?: string | null): OrderStatus {
   const normalized = (status || '').toLowerCase();
   if (normalized === 'em_rota' || normalized === 'em rota') return 'Em Rota';
-  if (normalized === 'entregue') return 'Entregue';
+  if (
+    normalized === 'entregue' ||
+    normalized === 'concluido' ||
+    normalized === 'concluído'
+  ) {
+    return 'Entregue';
+  }
   return 'Aguardando';
 }
 
@@ -185,6 +205,15 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
     hasEar: Boolean(row.cnh_ear),
     dailyPassInterest: row.role === 'motorista',
     bikeMaxRadiusKm,
+    ratingAvg:
+      row.rating_avg !== null && row.rating_avg !== undefined
+        ? Number(row.rating_avg)
+        : 0,
+    ratingCount:
+      row.rating_count !== null && row.rating_count !== undefined
+        ? Number(row.rating_count)
+        : 0,
+    isOnline: Boolean(row.is_online),
     approvalStatus: mapDbStatusToApproval(row.status),
     createdAt: row.created_at || new Date().toISOString(),
   };
@@ -271,9 +300,32 @@ function normalizeOrderFromRows(
 
   const rawSource = row.source_channel || 'Lojista Porto Alegre';
   const hasPlatformTag = rawSource.includes('[PIX:plataforma]');
+  const uidMatch = rawSource.match(/\[UID:([a-zA-Z0-9-]+)\]/);
+  const extractedMerchantId = uidMatch?.[1] || '';
+
   const cleanMerchantName =
-    rawSource.replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '').trim() ||
-    'Lojista Porto Alegre';
+    rawSource
+      .replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '')
+      .replace(/\s*\[UID:[a-zA-Z0-9-]+\]/g, '')
+      .trim() || 'Lojista Porto Alegre';
+
+  let merchantProfile = extractedMerchantId
+    ? profileById.get(extractedMerchantId)
+    : undefined;
+  if (!merchantProfile) {
+    const cleanLower = cleanMerchantName.toLowerCase();
+    for (const candidate of profileById.values()) {
+      if (candidate.role !== 'lojista' && candidate.role !== 'admin') continue;
+      if (
+        candidate.name.toLowerCase() === cleanLower ||
+        candidate.businessName?.toLowerCase() === cleanLower ||
+        candidate.companyLegalName?.toLowerCase() === cleanLower
+      ) {
+        merchantProfile = candidate;
+        break;
+      }
+    }
+  }
 
   const resolvedPaymentMethod: PixPaymentMethod =
     row.payment_method === 'pix_plataforma' || hasPlatformTag
@@ -292,8 +344,10 @@ function normalizeOrderFromRows(
     id: row.id,
     code: formatDeliveryCode(row.id),
     type: row.type,
-    merchantId: 'lojista-supabase',
+    merchantId: merchantProfile?.id || extractedMerchantId || '',
     merchantName: cleanMerchantName,
+    merchantRatingAvg: merchantProfile?.ratingAvg,
+    merchantRatingCount: merchantProfile?.ratingCount,
     pickupAddress: parsedPickup.address,
     pickupNeighborhood: parsedPickup.neighborhood,
     pickupLat: pickupCoords.lat,
@@ -327,6 +381,8 @@ function normalizeOrderFromRows(
     assignedCourierName: row.driver_name || undefined,
     assignedCourierPixKey: assignedDriver?.pixKey || undefined,
     assignedCourierPropulsion: assignedDriver?.propulsion,
+    assignedCourierRatingAvg: assignedDriver?.ratingAvg,
+    assignedCourierRatingCount: assignedDriver?.ratingCount,
     appliedPlatformFee: orderStatus !== 'Aguardando' ? appliedFee : undefined,
     evBonusApplied,
     netCourierPayout: orderStatus !== 'Aguardando' ? driverPayout : undefined,
@@ -360,7 +416,10 @@ async function fetchStopsForDeliveries(
 }
 
 const SAFE_PROFILE_COLUMNS =
-  'id, name, phone, email, pix_key, person_type, document_number, company_legal_name, role, vehicle_type, propulsion, max_radius_km, cnh_ear, status, two_factor_enabled, created_at';
+  'id, name, phone, email, pix_key, person_type, document_number, company_legal_name, role, vehicle_type, propulsion, max_radius_km, cnh_ear, status, two_factor_enabled, rating_avg, rating_count, is_online, created_at';
+
+const PUBLIC_DIRECTORY_COLUMNS =
+  'id, name, person_type, company_legal_name, role, vehicle_type, propulsion, max_radius_km, pix_key, status, rating_avg, rating_count, is_online, created_at';
 
 function formatBrPhoneVariants(raw: string): string[] {
   const trimmed = raw.trim();
@@ -390,6 +449,25 @@ export async function checkIfDatabaseIsEmpty(): Promise<boolean> {
   }
 
   return (profRes.count ?? 0) === 0 && (delRes.count ?? 0) === 0;
+}
+
+/**
+ * Consulta agregada pública para a Landing Page: retorna apenas o total numérico
+ * de entregadores/motoristas aprovados atualmente online, sem expor dados pessoais.
+ */
+export async function fetchOnlineCouriersCountInSupabase(): Promise<number> {
+  const { count, error } = await supabase
+    .from('profiles')
+    .select('id', { count: 'exact', head: true })
+    .eq('status', 'aprovado')
+    .in('role', ['entregador', 'motorista'])
+    .eq('is_online', true);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return count ?? 0;
 }
 
 export async function loginWithPhoneAndPin(
@@ -463,6 +541,23 @@ export async function fetchAllProfiles(): Promise<Profile[]> {
   const { data, error } = await supabase
     .from('profiles')
     .select(SAFE_PROFILE_COLUMNS)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+}
+
+/**
+ * Busca diretório público enxuto (sem CPF/CNPJ, e-mail, telefone ou PIN)
+ * para exibir notas (estrelas) e identificar remetentes/condutores nas avaliações.
+ */
+export async function fetchPublicProfilesDirectory(): Promise<Profile[]> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select(PUBLIC_DIRECTORY_COLUMNS)
     .order('created_at', { ascending: false });
 
   if (error) {
@@ -658,6 +753,246 @@ export async function updateProfileStatusInSupabase(
   return normalizeProfileFromRow(data as DbProfileRow);
 }
 
+export interface AdminProfileUpdateInput {
+  profileId: string;
+  name: string;
+  phone: string;
+  email?: string;
+  role: UserRole;
+  personType: PersonType;
+  documentNumber?: string;
+  companyLegalName?: string;
+  approvalStatus: ApprovalStatus;
+  accessPin?: string;
+  pixKey?: string;
+  vehicleType?: VehicleType | null;
+  propulsion?: PropulsionType | null;
+  bikeMaxRadiusKm?: number | null;
+  hasEar?: boolean;
+}
+
+export async function adminUpdateProfileInSupabase(
+  input: AdminProfileUpdateInput
+): Promise<Profile> {
+  const cleanName = input.name.trim();
+  const cleanPhone = input.phone.trim();
+  if (!cleanName || !cleanPhone) {
+    throw new Error('Nome e telefone/usuário de acesso são obrigatórios.');
+  }
+
+  const cleanPin = (input.accessPin || '').trim();
+  if (cleanPin && !/^\d{4}$/.test(cleanPin)) {
+    throw new Error('O PIN de acesso deve conter exatamente 4 dígitos numéricos.');
+  }
+
+  const isDriverOrCourier =
+    input.role === 'entregador' || input.role === 'motorista';
+  const docDigits = onlyDigits(input.documentNumber || '');
+
+  const payload: Record<string, unknown> = {
+    name: cleanName,
+    phone: cleanPhone,
+    email: input.email?.trim() || null,
+    role: input.role,
+    person_type: input.personType,
+    document_number: docDigits || null,
+    company_legal_name:
+      input.personType === 'PJ'
+        ? input.companyLegalName?.trim() || cleanName
+        : null,
+    status: mapApprovalToDbStatus(input.approvalStatus),
+    pix_key: input.pixKey?.trim() || null,
+    vehicle_type: isDriverOrCourier ? input.vehicleType ?? null : null,
+    propulsion: isDriverOrCourier ? input.propulsion ?? null : null,
+    max_radius_km:
+      isDriverOrCourier && input.vehicleType === 'Bike'
+        ? input.bikeMaxRadiusKm === undefined
+          ? 3
+          : input.bikeMaxRadiusKm
+        : null,
+    cnh_ear: isDriverOrCourier ? Boolean(input.hasEar) : false,
+  };
+
+  if (cleanPin) {
+    payload.access_pin = cleanPin;
+  }
+
+  const { data, error } = await supabase
+    .from('profiles')
+    .update(payload)
+    .eq('id', input.profileId)
+    .select(SAFE_PROFILE_COLUMNS)
+    .single();
+
+  if (error) {
+    const errLower = (error.message || '').toLowerCase();
+    if (
+      error.code === '23505' ||
+      errLower.includes('23505') ||
+      errLower.includes('duplicate key')
+    ) {
+      throw new Error(
+        'Este CPF/CNPJ ou telefone já pertence a outro usuário cadastrado.'
+      );
+    }
+    throw new Error(error.message);
+  }
+
+  return normalizeProfileFromRow(data as DbProfileRow);
+}
+
+export async function adminDeleteProfileInSupabase(params: {
+  profileId: string;
+  currentAdminId: string;
+}): Promise<void> {
+  if (params.profileId === params.currentAdminId) {
+    throw new Error(
+      'Não é possível excluir o próprio usuário Administrador logado no momento.'
+    );
+  }
+
+  const { error } = await supabase
+    .from('profiles')
+    .delete()
+    .eq('id', params.profileId);
+
+  if (error) {
+    const errLower = (error.message || '').toLowerCase();
+    if (
+      error.code === '23503' ||
+      errLower.includes('foreign key') ||
+      errLower.includes('violates')
+    ) {
+      throw new Error(
+        'Este usuário possui entregas ou avaliações vinculadas no histórico. Utilize a opção "Bloquear" para suspender o acesso sem perder o histórico.'
+      );
+    }
+    throw new Error(error.message);
+  }
+}
+
+function normalizeRatingFromRow(row: DbRatingRow): Rating {
+  return {
+    id: row.id,
+    deliveryId: row.delivery_id,
+    fromProfileId: row.from_profile_id,
+    toProfileId: row.to_profile_id,
+    stars: Number(row.stars),
+    comment: row.comment || undefined,
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+export async function fetchAllRatingsInSupabase(): Promise<Rating[]> {
+  const { data, error } = await supabase
+    .from('ratings')
+    .select('id, delivery_id, from_profile_id, to_profile_id, stars, comment, created_at')
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data || []) as DbRatingRow[]).map(normalizeRatingFromRow);
+}
+
+export async function submitRatingInSupabase(params: {
+  deliveryId: string;
+  fromProfileId: string;
+  toProfileId: string;
+  stars: number;
+  comment?: string;
+}): Promise<{
+  rating: Rating;
+  targetProfileId: string;
+  ratingAvg: number;
+  ratingCount: number;
+}> {
+  const safeStars = Math.round(params.stars);
+  if (safeStars < 1 || safeStars > 5) {
+    throw new Error('A avaliação deve ter entre 1 e 5 estrelas.');
+  }
+  if (!params.fromProfileId || !params.toProfileId) {
+    throw new Error('Perfis inválidos para registrar avaliação.');
+  }
+  if (params.fromProfileId === params.toProfileId) {
+    throw new Error('Não é possível avaliar o próprio perfil.');
+  }
+
+  // Bloqueia avaliar o mesmo pedido duas vezes pelo mesmo usuário
+  const { data: existing, error: existingErr } = await supabase
+    .from('ratings')
+    .select('id')
+    .eq('delivery_id', params.deliveryId)
+    .eq('from_profile_id', params.fromProfileId)
+    .maybeSingle();
+
+  if (existingErr) {
+    throw new Error(existingErr.message);
+  }
+  if (existing) {
+    throw new Error('Você já avaliou este pedido.');
+  }
+
+  const { data: inserted, error: insertErr } = await supabase
+    .from('ratings')
+    .insert({
+      delivery_id: params.deliveryId,
+      from_profile_id: params.fromProfileId,
+      to_profile_id: params.toProfileId,
+      stars: safeStars,
+      comment: params.comment?.trim() || null,
+    })
+    .select('id, delivery_id, from_profile_id, to_profile_id, stars, comment, created_at')
+    .single();
+
+  if (insertErr) {
+    const errLower = (insertErr.message || '').toLowerCase();
+    if (
+      insertErr.code === '23505' ||
+      errLower.includes('duplicate key')
+    ) {
+      throw new Error('Você já avaliou este pedido.');
+    }
+    throw new Error(insertErr.message);
+  }
+
+  // Recalcula rating_avg e rating_count do usuário avaliado
+  const { data: allTargetRatings, error: statsErr } = await supabase
+    .from('ratings')
+    .select('stars')
+    .eq('to_profile_id', params.toProfileId);
+
+  if (statsErr) {
+    throw new Error(statsErr.message);
+  }
+
+  const rows = (allTargetRatings || []) as Array<{ stars: number }>;
+  const ratingCount = rows.length;
+  const totalStars = rows.reduce((acc, r) => acc + Number(r.stars || 0), 0);
+  const ratingAvg =
+    ratingCount > 0 ? Number((totalStars / ratingCount).toFixed(2)) : 0;
+
+  const { error: updateProfErr } = await supabase
+    .from('profiles')
+    .update({
+      rating_avg: ratingAvg,
+      rating_count: ratingCount,
+    })
+    .eq('id', params.toProfileId);
+
+  if (updateProfErr) {
+    throw new Error(updateProfErr.message);
+  }
+
+  return {
+    rating: normalizeRatingFromRow(inserted as DbRatingRow),
+    targetProfileId: params.toProfileId,
+    ratingAvg,
+    ratingCount,
+  };
+}
+
 export async function updateBikeMaxRadiusInSupabase(
   courierId: string,
   radiusKm: number | null
@@ -674,6 +1009,50 @@ export async function updateBikeMaxRadiusInSupabase(
   }
 
   return normalizeProfileFromRow(data as DbProfileRow);
+}
+
+export async function updateCourierOnlineStatusInSupabase(
+  profileId: string,
+  isOnline: boolean
+): Promise<Profile> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .update({ is_online: isOnline })
+    .eq('id', profileId)
+    .select(SAFE_PROFILE_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeProfileFromRow(data as DbProfileRow);
+}
+
+export async function fetchDeliveryByIdWithStops(
+  deliveryId: string,
+  profilesList?: Profile[]
+): Promise<Order | null> {
+  const { data, error } = await supabase
+    .from('deliveries')
+    .select('*')
+    .eq('id', deliveryId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!data) return null;
+
+  const stopsMap = await fetchStopsForDeliveries([deliveryId]);
+  const profileMap = new Map(
+    (profilesList || []).map((p) => [p.id, p] as const)
+  );
+  return normalizeOrderFromRows(
+    data as DbDeliveryRow,
+    stopsMap.get(deliveryId) || [],
+    profileMap
+  );
 }
 
 export async function verifyLoginTwoFactor(
@@ -895,6 +1274,12 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     : `${order.pickupAddress} (${order.pickupNeighborhood})`;
 
   const chosenMethod: PixPaymentMethod = order.paymentMethod || 'pix_direto';
+  const baseName = order.merchantName || 'Painel do Lojista';
+  const hasValidMerchantId =
+    Boolean(order.merchantId) && order.merchantId !== 'lojista-supabase';
+  const sourceChannelWithUid = hasValidMerchantId
+    ? `${baseName} [UID:${order.merchantId}]`
+    : baseName;
 
   const basePayload = {
     type: order.type,
@@ -913,7 +1298,7 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     payment_status: 'pendente_pagamento' as PaymentStatus,
     driver_id: null,
     driver_name: null,
-    source_channel: order.merchantName || 'Painel do Lojista',
+    source_channel: sourceChannelWithUid,
   };
 
   let { data: insertedDelivery, error: deliveryError } = await supabase

@@ -1,4 +1,4 @@
-import { Order, OrderType, VehicleType } from '../types';
+import { Order, OrderType, PropulsionType, VehicleType } from '../types';
 
 export const VEHICLE_CATEGORIES: VehicleType[] = [
   'Bike',
@@ -6,6 +6,18 @@ export const VEHICLE_CATEGORIES: VehicleType[] = [
   'Carro Pequeno (Passeio)',
   'Utilitário / Picape / Van',
 ];
+
+export function getPropulsionOptionsForVehicle(
+  vehicleType?: VehicleType
+): PropulsionType[] {
+  if (vehicleType === 'Bike') {
+    return [
+      'Elétrica / Pedal Assistido (E-Bike)',
+      'Propulsão Humana (Convencional)',
+    ];
+  }
+  return ['Elétrico', 'Combustão'];
+}
 
 export const BIKE_RADIUS_OPTIONS: Array<{
   value: number | null;

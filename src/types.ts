@@ -60,7 +60,20 @@ export interface Profile {
   hasEar?: boolean;
   dailyPassInterest?: boolean;
   bikeMaxRadiusKm?: number | null;
+  ratingAvg?: number;
+  ratingCount?: number;
+  isOnline?: boolean;
   approvalStatus: ApprovalStatus;
+  createdAt: string;
+}
+
+export interface Rating {
+  id: string;
+  deliveryId: string;
+  fromProfileId: string;
+  toProfileId: string;
+  stars: number;
+  comment?: string;
   createdAt: string;
 }
 
@@ -85,6 +98,8 @@ export interface Order {
   type: OrderType;
   merchantId: string;
   merchantName: string;
+  merchantRatingAvg?: number;
+  merchantRatingCount?: number;
   pickupAddress: string;
   pickupNeighborhood: string;
   pickupLat?: number;
@@ -104,6 +119,8 @@ export interface Order {
   assignedCourierName?: string;
   assignedCourierPixKey?: string;
   assignedCourierPropulsion?: PropulsionType;
+  assignedCourierRatingAvg?: number;
+  assignedCourierRatingCount?: number;
   appliedPlatformFee?: number;
   evBonusApplied?: number;
   netCourierPayout?: number;

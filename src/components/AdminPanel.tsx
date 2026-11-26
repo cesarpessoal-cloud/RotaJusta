@@ -5,17 +5,27 @@ import {
   CheckCircle2,
   Copy,
   Database,
+  Pencil,
   QrCode,
   RefreshCw,
   ShieldCheck,
+  Star,
+  Trash2,
   Wallet,
+  X,
 } from 'lucide-react';
+import { AdminProfileUpdateInput } from '../lib/supabaseService';
 import {
   ApprovalStatus,
   Order,
   PaymentStatus,
+  PersonType,
   PixKeyType,
   Profile,
+  PropulsionType,
+  Rating,
+  UserRole,
+  VehicleType,
 } from '../types';
 import {
   formatPaymentMethodLabel,
@@ -23,37 +33,56 @@ import {
   inferPixKeyType,
   PIX_KEY_TYPES,
 } from '../utils/pix';
-import { formatCpfOrCnpj } from '../utils/documentValidation';
+import {
+  formatCnpjMask,
+  formatCpfMask,
+  formatCpfOrCnpj,
+  onlyDigits,
+} from '../utils/documentValidation';
 import { formatBRL, formatDateTimeBR, isZeroFeePropulsion } from '../utils/pricing';
+import {
+  BIKE_RADIUS_OPTIONS,
+  getPropulsionOptionsForVehicle,
+  VEHICLE_CATEGORIES,
+} from '../utils/vehicleCompatibility';
 import {
   ApprovalStatusBadge,
   OrderStatusBadge,
   PaymentStatusBadge,
   PropulsionTag,
 } from './EvBadge';
+import { RatingBadge } from './RatingWidgets';
 
 interface AdminPanelProps {
+  currentAdminId: string;
   profiles: Profile[];
   orders: Order[];
+  ratings: Rating[];
   platformPixKey: string | null;
   isDatabaseEmpty: boolean;
   isSeeding: boolean;
   onUpdateApproval: (profileId: string, status: ApprovalStatus) => Promise<void>;
+  onEditProfile: (input: AdminProfileUpdateInput) => Promise<void>;
+  onDeleteProfile: (profileId: string) => Promise<void>;
   onRefreshData: () => Promise<void>;
   onSeedTestData: () => Promise<void>;
   onUpdatePlatformPixKey: (pixKey: string) => Promise<void>;
   onMarkRepasseDone: (orderId: string) => Promise<void>;
 }
 
-type AdminSectionTab = 'operacao' | 'financeiro';
+type AdminSectionTab = 'operacao' | 'financeiro' | 'avaliacoes';
 
 export function AdminPanel({
+  currentAdminId,
   profiles,
   orders,
+  ratings,
   platformPixKey,
   isDatabaseEmpty,
   isSeeding,
   onUpdateApproval,
+  onEditProfile,
+  onDeleteProfile,
   onRefreshData,
   onSeedTestData,
   onUpdatePlatformPixKey,
@@ -61,7 +90,7 @@ export function AdminPanel({
 }: AdminPanelProps) {
   const [adminTab, setAdminTab] = useState<AdminSectionTab>('operacao');
   const [statusFilter, setStatusFilter] = useState<'Todos' | ApprovalStatus>(
-    'Aguardando Aprovação'
+    'Todos'
   );
   const [paymentFilter, setPaymentFilter] = useState<'Todos' | PaymentStatus>(
     'Todos'
@@ -78,6 +107,31 @@ export function AdminPanel({
   const [processingRepasseId, setProcessingRepasseId] = useState<string | null>(
     null
   );
+
+  // Edit User Modal state
+  const [editingProfile, setEditingProfile] = useState<Profile | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+  const [editEmail, setEditEmail] = useState('');
+  const [editRole, setEditRole] = useState<UserRole>('entregador');
+  const [editPersonType, setEditPersonType] = useState<PersonType>('PF');
+  const [editDocument, setEditDocument] = useState('');
+  const [editCompanyLegalName, setEditCompanyLegalName] = useState('');
+  const [editStatus, setEditStatus] = useState<ApprovalStatus>('Aprovado');
+  const [editAccessPin, setEditAccessPin] = useState('');
+  const [editPixKey, setEditPixKey] = useState('');
+  const [editVehicleType, setEditVehicleType] = useState<VehicleType>('Moto');
+  const [editPropulsion, setEditPropulsion] =
+    useState<PropulsionType>('Elétrico');
+  const [editBikeRadiusKm, setEditBikeRadiusKm] = useState<number | null>(3);
+  const [editHasEar, setEditHasEar] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // Delete Confirmation Modal state
+  const [deletingProfile, setDeletingProfile] = useState<Profile | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   useEffect(() => {
     setOfficialPixInput(platformPixKey || '');
@@ -97,6 +151,17 @@ export function AdminPanel({
         (p) =>
           (p.role === 'entregador' || p.role === 'motorista') &&
           p.approvalStatus === 'Aprovado'
+      ).length,
+    [profiles]
+  );
+
+  const onlineDriversCount = useMemo(
+    () =>
+      profiles.filter(
+        (p) =>
+          (p.role === 'entregador' || p.role === 'motorista') &&
+          p.approvalStatus === 'Aprovado' &&
+          Boolean(p.isOnline)
       ).length,
     [profiles]
   );
@@ -183,6 +248,154 @@ export function AdminPanel({
       setProcessingRepasseId(null);
     }
   };
+
+  const openEditModal = (profile: Profile) => {
+    setEditingProfile(profile);
+    setEditName(profile.name || '');
+    setEditPhone(profile.phone || '');
+    setEditEmail(profile.email || '');
+    setEditRole(profile.role);
+    const inferredPersonType: PersonType =
+      profile.personType ||
+      (onlyDigits(profile.documentNumber || profile.document).length === 14
+        ? 'PJ'
+        : 'PF');
+    setEditPersonType(inferredPersonType);
+    setEditDocument(
+      formatCpfOrCnpj(
+        profile.documentNumber || profile.document,
+        inferredPersonType
+      )
+    );
+    setEditCompanyLegalName(profile.companyLegalName || '');
+    setEditStatus(profile.approvalStatus);
+    setEditAccessPin('');
+    setEditPixKey(profile.pixKey || '');
+    const vType: VehicleType = profile.vehicleType || 'Moto';
+    setEditVehicleType(vType);
+    const allowedProps = getPropulsionOptionsForVehicle(vType);
+    const currentProp = profile.propulsion;
+    setEditPropulsion(
+      currentProp && allowedProps.includes(currentProp)
+        ? currentProp
+        : allowedProps[0]
+    );
+    setEditBikeRadiusKm(
+      profile.bikeMaxRadiusKm === undefined ? 3 : profile.bikeMaxRadiusKm
+    );
+    setEditHasEar(Boolean(profile.hasEar));
+    setEditError(null);
+  };
+
+  const handleEditVehicleChange = (nextVehicle: VehicleType) => {
+    setEditVehicleType(nextVehicle);
+    const allowed = getPropulsionOptionsForVehicle(nextVehicle);
+    if (!allowed.includes(editPropulsion)) {
+      setEditPropulsion(allowed[0]);
+    }
+    if (nextVehicle === 'Bike' && editBikeRadiusKm === undefined) {
+      setEditBikeRadiusKm(3);
+    }
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingProfile) return;
+    setEditError(null);
+
+    if (!editName.trim() || !editPhone.trim()) {
+      setEditError('Nome e telefone/usuário de acesso são obrigatórios.');
+      return;
+    }
+    if (editAccessPin.trim() && !/^\d{4}$/.test(editAccessPin.trim())) {
+      setEditError('O novo PIN deve conter exatamente 4 dígitos numéricos.');
+      return;
+    }
+
+    setIsSavingEdit(true);
+    try {
+      await onEditProfile({
+        profileId: editingProfile.id,
+        name: editName.trim(),
+        phone: editPhone.trim(),
+        email: editEmail.trim(),
+        role: editRole,
+        personType: editPersonType,
+        documentNumber: editDocument,
+        companyLegalName: editCompanyLegalName.trim(),
+        approvalStatus: editStatus,
+        accessPin: editAccessPin.trim() || undefined,
+        pixKey: editPixKey.trim(),
+        vehicleType:
+          editRole === 'entregador' || editRole === 'motorista'
+            ? editVehicleType
+            : null,
+        propulsion:
+          editRole === 'entregador' || editRole === 'motorista'
+            ? editPropulsion
+            : null,
+        bikeMaxRadiusKm:
+          (editRole === 'entregador' || editRole === 'motorista') &&
+          editVehicleType === 'Bike'
+            ? editBikeRadiusKm
+            : null,
+        hasEar:
+          editRole === 'entregador' || editRole === 'motorista'
+            ? editHasEar
+            : false,
+      });
+      setEditingProfile(null);
+    } catch (err) {
+      setEditError(
+        err instanceof Error
+          ? err.message
+          : 'Erro ao atualizar cadastro no Supabase.'
+      );
+    } finally {
+      setIsSavingEdit(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deletingProfile) return;
+    setDeleteError(null);
+    setIsDeleting(true);
+    try {
+      await onDeleteProfile(deletingProfile.id);
+      setDeletingProfile(null);
+    } catch (err) {
+      setDeleteError(
+        err instanceof Error
+          ? err.message
+          : 'Não foi possível excluir este usuário.'
+      );
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const profileById = useMemo(
+    () => new Map(profiles.map((p) => [p.id, p] as const)),
+    [profiles]
+  );
+
+  const orderById = useMemo(
+    () => new Map(orders.map((o) => [o.id, o] as const)),
+    [orders]
+  );
+
+  const ratingsSummary = useMemo(() => {
+    if (ratings.length === 0) {
+      return { count: 0, avg: 0, fiveStarCount: 0 };
+    }
+    const sum = ratings.reduce((acc, r) => acc + r.stars, 0);
+    const fiveStarCount = ratings.filter((r) => r.stars === 5).length;
+    return {
+      count: ratings.length,
+      avg: Number((sum / ratings.length).toFixed(1)),
+      fiveStarCount,
+    };
+  }, [ratings]);
 
   const roleLabel = (profile: Profile) => {
     if (profile.role === 'admin') return 'Administrador';
@@ -284,6 +497,28 @@ export function AdminPanel({
             </span>
           )}
         </button>
+
+        <button
+          type="button"
+          onClick={() => setAdminTab('avaliacoes')}
+          className={`inline-flex items-center gap-2 rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
+            adminTab === 'avaliacoes'
+              ? 'bg-amber-500 text-white'
+              : 'border border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+          }`}
+        >
+          <Star className="h-3.5 w-3.5" aria-hidden="true" />
+          <span>Avaliações (Estrelas)</span>
+          <span
+            className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-bold ${
+              adminTab === 'avaliacoes'
+                ? 'bg-white text-amber-800'
+                : 'bg-amber-100 text-amber-900'
+            }`}
+          >
+            {ratings.length}
+          </span>
+        </button>
       </div>
 
       {/* Admin KPI Strip */}
@@ -301,7 +536,17 @@ export function AdminPanel({
           <p className="mt-1 font-mono text-2xl font-bold text-zinc-900 tabular-nums">
             {approvedDriversCount}
           </p>
-          <p className="mt-1 text-xs text-zinc-500">Habilitados para operar</p>
+          <p className="mt-1 flex items-center gap-1.5 text-xs font-medium text-emerald-700">
+            <span
+              className={`h-2 w-2 rounded-full ${
+                onlineDriversCount > 0
+                  ? 'bg-emerald-500 animate-pulse'
+                  : 'bg-zinc-400'
+              }`}
+              aria-hidden="true"
+            />
+            <span>{onlineDriversCount} ONLINE agora em POA</span>
+          </p>
         </div>
 
         <div className="rounded-xl border border-zinc-200 bg-white p-4 sm:p-5">
@@ -323,7 +568,143 @@ export function AdminPanel({
         </div>
       </section>
 
-      {adminTab === 'financeiro' ? (
+      {adminTab === 'avaliacoes' ? (
+        <section className="space-y-6">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+            <div className="rounded-xl border border-zinc-200 bg-white p-4">
+              <p className="text-xs font-medium text-zinc-500">
+                Total de Avaliações
+              </p>
+              <p className="mt-1 font-mono text-2xl font-bold text-zinc-900 tabular-nums">
+                {ratingsSummary.count}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">
+                Registradas na tabela ratings
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-4">
+              <p className="text-xs font-medium text-amber-900">
+                Média Geral da Rede
+              </p>
+              <p className="mt-1 font-mono text-2xl font-bold text-amber-800 tabular-nums">
+                {ratingsSummary.count > 0
+                  ? `★ ${ratingsSummary.avg.toFixed(1)}`
+                  : '—'}
+              </p>
+              <p className="mt-1 text-xs text-amber-800/80">
+                Escala de 1 a 5 estrelas
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
+              <p className="text-xs font-medium text-emerald-900">
+                Notas Máximas (5 ★)
+              </p>
+              <p className="mt-1 font-mono text-2xl font-bold text-emerald-700 tabular-nums">
+                {ratingsSummary.fiveStarCount}
+              </p>
+              <p className="mt-1 text-xs text-emerald-800">
+                Excelência em entregas e coletas
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-3">
+            <div>
+              <h2 className="font-display text-xl font-semibold text-zinc-900">
+                Histórico de Avaliações Mútuas
+              </h2>
+              <p className="text-xs text-zinc-500">
+                Notas trocadas entre Lojistas/PF e Entregadores após entregas concluídas.
+              </p>
+            </div>
+
+            {ratings.length === 0 ? (
+              <div className="rounded-xl border border-zinc-200 bg-white p-10 text-center space-y-2">
+                <Star
+                  className="mx-auto h-8 w-8 text-amber-500"
+                  aria-hidden="true"
+                />
+                <p className="text-sm font-medium text-zinc-900">
+                  Nenhuma avaliação registrada ainda.
+                </p>
+                <p className="text-xs text-zinc-500">
+                  Assim que pedidos forem concluídos e avaliados por lojistas ou
+                  entregadores, as notas aparecerão aqui.
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-zinc-200 rounded-xl border border-zinc-200 bg-white overflow-hidden">
+                {ratings.map((item) => {
+                  const fromUser = profileById.get(item.fromProfileId);
+                  const toUser = profileById.get(item.toProfileId);
+                  const linkedOrder = orderById.get(item.deliveryId);
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="p-4 sm:p-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className="font-mono font-semibold text-zinc-900">
+                            {linkedOrder?.code || 'Pedido'}
+                          </span>
+                          <span className="text-zinc-400">·</span>
+                          <span className="font-medium text-zinc-800">
+                            {fromUser?.name || 'Usuário'}
+                          </span>
+                          <span className="text-zinc-400">avaliou</span>
+                          <span className="font-semibold text-emerald-800">
+                            {toUser?.name || 'Usuário'}
+                          </span>
+                          {toUser && (
+                            <RatingBadge
+                              avg={toUser.ratingAvg}
+                              count={toUser.ratingCount}
+                              compact
+                            />
+                          )}
+                        </div>
+                        {item.comment ? (
+                          <p className="text-xs text-zinc-700 italic">
+                            &ldquo;{item.comment}&rdquo;
+                          </p>
+                        ) : (
+                          <p className="text-xs text-zinc-400">
+                            Sem comentário adicional
+                          </p>
+                        )}
+                        <p className="text-[11px] font-mono text-zinc-400 tabular-nums">
+                          {formatDateTimeBR(item.createdAt)}
+                        </p>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {[1, 2, 3, 4, 5].map((starVal) => (
+                          <Star
+                            key={starVal}
+                            className={`h-4 w-4 ${
+                              starVal <= item.stars
+                                ? 'fill-amber-400 text-amber-500'
+                                : 'text-zinc-200'
+                            }`}
+                            aria-hidden="true"
+                          />
+                        ))}
+                        <span className="ml-1 font-mono text-xs font-bold text-zinc-900">
+                          {item.stars}/5
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+      ) : adminTab === 'financeiro' ? (
         <div className="space-y-6">
           {/* Chave Pix Oficial RotaJusta */}
           <form
@@ -691,6 +1072,10 @@ export function AdminPanel({
                     <h3 className="font-display text-base font-semibold text-zinc-900">
                       {profile.businessName || profile.name}
                     </h3>
+                    <RatingBadge
+                      avg={profile.ratingAvg}
+                      count={profile.ratingCount}
+                    />
                     {profile.personType && (
                       <span
                         className={`inline-flex items-center rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold ${
@@ -703,6 +1088,25 @@ export function AdminPanel({
                       </span>
                     )}
                     <ApprovalStatusBadge status={profile.approvalStatus} />
+                    {(profile.role === 'entregador' ||
+                      profile.role === 'motorista') &&
+                      profile.approvalStatus === 'Aprovado' && (
+                        <span
+                          className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
+                            profile.isOnline
+                              ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                              : 'border-zinc-200 bg-zinc-100 text-zinc-600'
+                          }`}
+                        >
+                          <span
+                            className={`h-1.5 w-1.5 rounded-full ${
+                              profile.isOnline ? 'bg-emerald-500' : 'bg-zinc-400'
+                            }`}
+                            aria-hidden="true"
+                          />
+                          <span>{profile.isOnline ? 'ONLINE' : 'OFFLINE'}</span>
+                        </span>
+                      )}
                     {profile.propulsion && (
                       <PropulsionTag propulsion={profile.propulsion} />
                     )}
@@ -800,13 +1204,13 @@ export function AdminPanel({
                   </div>
                 </div>
 
-                {/* One-click Approval / Block Actions */}
-                <div className="flex items-center gap-2.5 shrink-0">
+                {/* One-click Approval / Block + Edit & Delete Actions */}
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
                   {profile.approvalStatus !== 'Aprovado' && (
                     <button
                       type="button"
                       onClick={() => onUpdateApproval(profile.id, 'Aprovado')}
-                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap"
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-2 text-xs font-semibold text-white transition-colors hover:bg-emerald-700 whitespace-nowrap"
                     >
                       <Check className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Aprovar</span>
@@ -816,10 +1220,39 @@ export function AdminPanel({
                     <button
                       type="button"
                       onClick={() => onUpdateApproval(profile.id, 'Bloqueado')}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 whitespace-nowrap"
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 transition-colors hover:bg-amber-100 whitespace-nowrap"
                     >
                       <Ban className="h-3.5 w-3.5" aria-hidden="true" />
                       <span>Bloquear</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => openEditModal(profile)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3.5 py-2 text-xs font-semibold text-zinc-800 transition-colors hover:bg-zinc-50 whitespace-nowrap"
+                  >
+                    <Pencil className="h-3.5 w-3.5 text-zinc-600" aria-hidden="true" />
+                    <span>Editar</span>
+                  </button>
+                  {profile.id === currentAdminId ? (
+                    <span
+                      title="Não é possível excluir o próprio usuário Admin logado"
+                      className="inline-flex items-center gap-1 rounded-lg border border-zinc-200 bg-zinc-100 px-3 py-2 text-[11px] font-medium text-zinc-400 whitespace-nowrap cursor-not-allowed"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Protegido</span>
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeleteError(null);
+                        setDeletingProfile(profile);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2 text-xs font-semibold text-red-700 transition-colors hover:bg-red-100 whitespace-nowrap"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                      <span>Excluir</span>
                     </button>
                   )}
                 </div>
@@ -872,8 +1305,13 @@ export function AdminPanel({
                   </td>
                   <td className="px-4 py-3 text-zinc-700">
                     {order.assignedCourierName ? (
-                      <span className="inline-flex items-center gap-1.5">
+                      <span className="inline-flex flex-wrap items-center gap-1.5">
                         <span>{order.assignedCourierName}</span>
+                        <RatingBadge
+                          avg={order.assignedCourierRatingAvg}
+                          count={order.assignedCourierRatingCount}
+                          compact
+                        />
                         <PropulsionTag propulsion={order.assignedCourierPropulsion} />
                       </span>
                     ) : (
@@ -904,6 +1342,394 @@ export function AdminPanel({
         </div>
       </section>
         </>
+      )}
+
+      {/* Modal de Edição Completa de Usuário (Admin) */}
+      {editingProfile && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-edit-user-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/70 p-4 overflow-y-auto"
+          onClick={() => !isSavingEdit && setEditingProfile(null)}
+        >
+          <div
+            className="my-auto w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 bg-zinc-50/70">
+              <div>
+                <h2
+                  id="admin-edit-user-title"
+                  className="font-display text-base font-bold text-zinc-900"
+                >
+                  Editar Cadastro no Supabase
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  Alterações aplicadas diretamente na tabela profiles.
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={isSavingEdit}
+                onClick={() => setEditingProfile(null)}
+                aria-label="Fechar modal"
+                className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200/70 hover:text-zinc-900"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={handleEditSubmit}
+              className="p-5 space-y-4 max-h-[80vh] overflow-y-auto"
+            >
+              <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Nome / Loja
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Telefone / Usuário de Login
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value)}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    E-mail
+                  </label>
+                  <input
+                    type="email"
+                    value={editEmail}
+                    onChange={(e) => setEditEmail(e.target.value)}
+                    placeholder="email@exemplo.com"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Chave Pix
+                  </label>
+                  <input
+                    type="text"
+                    value={editPixKey}
+                    onChange={(e) => setEditPixKey(e.target.value)}
+                    placeholder="CPF, telefone, e-mail ou aleatória"
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Perfil (role)
+                  </label>
+                  <select
+                    value={editRole}
+                    onChange={(e) => setEditRole(e.target.value as UserRole)}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    <option value="lojista">lojista (Solicitante / Loja)</option>
+                    <option value="entregador">entregador</option>
+                    <option value="motorista">motorista</option>
+                    <option value="admin">admin</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Status de Acesso
+                  </label>
+                  <select
+                    value={editStatus}
+                    onChange={(e) =>
+                      setEditStatus(e.target.value as ApprovalStatus)
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    <option value="Aprovado">aprovado</option>
+                    <option value="Aguardando Aprovação">pendente</option>
+                    <option value="Bloqueado">bloqueado</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Tipo de Pessoa
+                  </label>
+                  <select
+                    value={editPersonType}
+                    onChange={(e) => {
+                      const next = e.target.value as PersonType;
+                      setEditPersonType(next);
+                      setEditDocument(
+                        next === 'PJ'
+                          ? formatCnpjMask(editDocument)
+                          : formatCpfMask(editDocument)
+                      );
+                    }}
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  >
+                    <option value="PF">PF (Pessoa Física)</option>
+                    <option value="PJ">PJ (Pessoa Jurídica)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    {editPersonType === 'PJ' ? 'CNPJ' : 'CPF'} (document_number)
+                  </label>
+                  <input
+                    type="text"
+                    value={editDocument}
+                    onChange={(e) =>
+                      setEditDocument(
+                        editPersonType === 'PJ'
+                          ? formatCnpjMask(e.target.value)
+                          : formatCpfMask(e.target.value)
+                      )
+                    }
+                    placeholder={
+                      editPersonType === 'PJ'
+                        ? '00.000.000/0001-00'
+                        : '000.000.000-00'
+                    }
+                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+
+                {editPersonType === 'PJ' && (
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                      Razão Social (PJ)
+                    </label>
+                    <input
+                      type="text"
+                      value={editCompanyLegalName}
+                      onChange={(e) => setEditCompanyLegalName(e.target.value)}
+                      placeholder="Razão social da empresa"
+                      className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                    />
+                  </div>
+                )}
+
+                <div className="sm:col-span-2">
+                  <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                    Novo PIN de Acesso (4 dígitos — deixe em branco para manter o atual)
+                  </label>
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    maxLength={4}
+                    value={editAccessPin}
+                    onChange={(e) =>
+                      setEditAccessPin(e.target.value.replace(/\D/g, '').slice(0, 4))
+                    }
+                    placeholder="•••• (opcional)"
+                    className="w-full sm:w-56 rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {(editRole === 'entregador' || editRole === 'motorista') && (
+                <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 space-y-3">
+                  <p className="text-xs font-semibold text-zinc-800">
+                    Dados do Veículo e Propulsão
+                  </p>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        Categoria do Veículo
+                      </label>
+                      <select
+                        value={editVehicleType}
+                        onChange={(e) =>
+                          handleEditVehicleChange(e.target.value as VehicleType)
+                        }
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      >
+                        {VEHICLE_CATEGORIES.map((v) => (
+                          <option key={v} value={v}>
+                            {v}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                        Propulsão
+                      </label>
+                      <select
+                        value={editPropulsion}
+                        onChange={(e) =>
+                          setEditPropulsion(e.target.value as PropulsionType)
+                        }
+                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      >
+                        {getPropulsionOptionsForVehicle(editVehicleType).map(
+                          (p) => (
+                            <option key={p} value={p}>
+                              {p}
+                            </option>
+                          )
+                        )}
+                      </select>
+                    </div>
+
+                    {editVehicleType === 'Bike' && (
+                      <div>
+                        <label className="block text-xs font-semibold text-zinc-700 mb-1">
+                          Raio máximo (Bike)
+                        </label>
+                        <select
+                          value={
+                            editBikeRadiusKm === null
+                              ? 'unlimited'
+                              : String(editBikeRadiusKm)
+                          }
+                          onChange={(e) =>
+                            setEditBikeRadiusKm(
+                              e.target.value === 'unlimited'
+                                ? null
+                                : Number(e.target.value)
+                            )
+                          }
+                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                        >
+                          {BIKE_RADIUS_OPTIONS.map((opt) => (
+                            <option
+                              key={opt.shortLabel}
+                              value={
+                                opt.value === null
+                                  ? 'unlimited'
+                                  : String(opt.value)
+                              }
+                            >
+                              {opt.fullLabel}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+
+                    <label className="flex items-center gap-2 text-xs text-zinc-800 pt-2">
+                      <input
+                        type="checkbox"
+                        checked={editHasEar}
+                        onChange={(e) => setEditHasEar(e.target.checked)}
+                        className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600"
+                      />
+                      <span>CNH com EAR confirmado</span>
+                    </label>
+                  </div>
+                </div>
+              )}
+
+              {editError && (
+                <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                  {editError}
+                </p>
+              )}
+
+              <div className="flex items-center justify-end gap-2.5 border-t border-zinc-100 pt-3">
+                <button
+                  type="button"
+                  disabled={isSavingEdit}
+                  onClick={() => setEditingProfile(null)}
+                  className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingEdit}
+                  className="rounded-lg bg-emerald-600 px-5 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60"
+                >
+                  {isSavingEdit ? 'Salvando...' : 'Salvar Alterações'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmação de Exclusão de Usuário */}
+      {deletingProfile && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-delete-user-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/70 p-4"
+          onClick={() => !isDeleting && setDeletingProfile(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-5 space-y-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="space-y-1.5">
+              <h2
+                id="admin-delete-user-title"
+                className="font-display text-base font-bold text-zinc-900"
+              >
+                Tem certeza que deseja excluir este usuário permanentemente?
+              </h2>
+              <p className="text-xs text-zinc-600">
+                Usuário:{' '}
+                <strong className="text-zinc-900">
+                  {deletingProfile.businessName || deletingProfile.name}
+                </strong>{' '}
+                ({roleLabel(deletingProfile)}). Essa ação remove o cadastro da
+                tabela <code className="font-mono">profiles</code> no Supabase.
+              </p>
+            </div>
+
+            {deleteError && (
+              <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
+                {deleteError}
+              </p>
+            )}
+
+            <div className="flex items-center justify-end gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setDeletingProfile(null)}
+                className="rounded-lg border border-zinc-300 bg-white px-4 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => void handleConfirmDelete()}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-4 py-2 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-60"
+              >
+                <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                <span>
+                  {isDeleting ? 'Excluindo...' : 'Excluir Permanentemente'}
+                </span>
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
