@@ -5,12 +5,16 @@ import {
   CheckCircle2,
   Copy,
   Database,
+  Eye,
   Pencil,
   QrCode,
   RefreshCw,
+  Search,
   ShieldCheck,
   Star,
+  Store,
   Trash2,
+  User,
   Wallet,
   X,
 } from 'lucide-react';
@@ -37,6 +41,8 @@ import {
   formatCnpjMask,
   formatCpfMask,
   formatCpfOrCnpj,
+  isValidCnpj,
+  isValidCpf,
   onlyDigits,
 } from '../utils/documentValidation';
 import { formatBRL, formatDateTimeBR, isZeroFeePropulsion } from '../utils/pricing';
@@ -71,6 +77,24 @@ interface AdminPanelProps {
 }
 
 type AdminSectionTab = 'operacao' | 'financeiro' | 'avaliacoes';
+type AdminProfileTypeFilter = 'Todos' | 'PF' | 'PJ' | 'Entregador';
+
+function getProfileCategory(
+  profile: Profile
+): 'pf' | 'pj' | 'entregador' | 'admin' {
+  if (profile.role === 'admin') return 'admin';
+  if (profile.role === 'entregador' || profile.role === 'motorista') {
+    return 'entregador';
+  }
+  const docDigits = onlyDigits(profile.documentNumber || profile.document || '');
+  if (
+    profile.personType === 'PF' ||
+    (!profile.personType && docDigits.length === 11)
+  ) {
+    return 'pf';
+  }
+  return 'pj';
+}
 
 export function AdminPanel({
   currentAdminId,
@@ -92,6 +116,9 @@ export function AdminPanel({
   const [statusFilter, setStatusFilter] = useState<'Todos' | ApprovalStatus>(
     'Todos'
   );
+  const [profileTypeFilter, setProfileTypeFilter] =
+    useState<AdminProfileTypeFilter>('Todos');
+  const [profileSearch, setProfileSearch] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'Todos' | PaymentStatus>(
     'Todos'
   );
@@ -127,6 +154,9 @@ export function AdminPanel({
   const [editHasEar, setEditHasEar] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // View Details Modal state
+  const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
 
   // Delete Confirmation Modal state
   const [deletingProfile, setDeletingProfile] = useState<Profile | null>(null);
@@ -213,10 +243,74 @@ export function AdminPanel({
     );
   }, [completedOrders, paymentFilter]);
 
+  const profileCategoryCounts = useMemo(() => {
+    let pf = 0;
+    let pj = 0;
+    let entregador = 0;
+    for (const p of profiles) {
+      const cat = getProfileCategory(p);
+      if (cat === 'pf') pf += 1;
+      else if (cat === 'pj') pj += 1;
+      else if (cat === 'entregador') entregador += 1;
+    }
+    return {
+      all: profiles.length,
+      pf,
+      pj,
+      entregador,
+    };
+  }, [profiles]);
+
+  const statusCounts = useMemo(() => {
+    let pending = 0;
+    let approved = 0;
+    let blocked = 0;
+    for (const p of profiles) {
+      if (p.approvalStatus === 'Aguardando Aprovação') pending += 1;
+      else if (p.approvalStatus === 'Aprovado') approved += 1;
+      else if (p.approvalStatus === 'Bloqueado') blocked += 1;
+    }
+    return { all: profiles.length, pending, approved, blocked };
+  }, [profiles]);
+
   const filteredProfiles = useMemo(() => {
-    if (statusFilter === 'Todos') return profiles;
-    return profiles.filter((p) => p.approvalStatus === statusFilter);
-  }, [profiles, statusFilter]);
+    const query = profileSearch.trim().toLowerCase();
+    const queryDigits = onlyDigits(profileSearch);
+
+    return profiles.filter((p) => {
+      if (statusFilter !== 'Todos' && p.approvalStatus !== statusFilter) {
+        return false;
+      }
+
+      if (profileTypeFilter !== 'Todos') {
+        const cat = getProfileCategory(p);
+        if (profileTypeFilter === 'PF' && cat !== 'pf') return false;
+        if (profileTypeFilter === 'PJ' && cat !== 'pj') return false;
+        if (profileTypeFilter === 'Entregador' && cat !== 'entregador') {
+          return false;
+        }
+      }
+
+      if (query) {
+        const docDigits = onlyDigits(p.documentNumber || p.document || '');
+        const phoneDigits = onlyDigits(p.phone || '');
+        const matchesText =
+          p.name.toLowerCase().includes(query) ||
+          (p.businessName || '').toLowerCase().includes(query) ||
+          (p.companyLegalName || '').toLowerCase().includes(query) ||
+          (p.email || '').toLowerCase().includes(query) ||
+          p.phone.toLowerCase().includes(query);
+        const matchesDigits =
+          queryDigits.length > 0 &&
+          (docDigits.includes(queryDigits) || phoneDigits.includes(queryDigits));
+        if (!matchesText && !matchesDigits) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [profiles, statusFilter, profileTypeFilter, profileSearch]);
 
   const handleSaveOfficialPix = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -307,6 +401,19 @@ export function AdminPanel({
       setEditError('Nome e telefone/usuário de acesso são obrigatórios.');
       return;
     }
+
+    const docDigits = onlyDigits(editDocument);
+    if (docDigits.length > 0) {
+      if (editPersonType === 'PF' && !isValidCpf(docDigits)) {
+        setEditError('CPF inválido. Confira os 11 dígitos ou deixe em branco.');
+        return;
+      }
+      if (editPersonType === 'PJ' && !isValidCnpj(docDigits)) {
+        setEditError('CNPJ inválido. Confira os 14 dígitos ou deixe em branco.');
+        return;
+      }
+    }
+
     if (editAccessPin.trim() && !/^\d{4}$/.test(editAccessPin.trim())) {
       setEditError('O novo PIN deve conter exatamente 4 dígitos numéricos.');
       return;
@@ -398,16 +505,14 @@ export function AdminPanel({
   }, [ratings]);
 
   const roleLabel = (profile: Profile) => {
-    if (profile.role === 'admin') return 'Administrador';
-    if (profile.role === 'lojista') {
-      return profile.personType === 'PF'
-        ? 'Solicitante PF (Entregas / Frete)'
-        : 'Empresa / Lojista (PJ)';
-    }
+    const cat = getProfileCategory(profile);
+    if (cat === 'admin') return 'Administrador';
+    if (cat === 'pf') return 'Pessoa Física (PF) · Entregas / Frete';
+    if (cat === 'pj') return 'Lojista / Empresa (PJ)';
     if (profile.role === 'motorista') {
-      return 'Motorista de Passageiros (Passe Diário R$ 20,00)';
+      return 'Motorista / Entregador (PF)';
     }
-    return 'Entregador (PF)';
+    return 'Entregador / Motorista (PF)';
   };
 
   return (
@@ -419,11 +524,11 @@ export function AdminPanel({
             Governança e Operações · Porto Alegre
           </p>
           <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-zinc-900">
-            Admin (Aprovações)
+            Admin (Gestão &amp; Aprovações)
           </h1>
           <p className="text-sm text-zinc-600 max-w-2xl">
-            Analise os cadastros de entregadores e motoristas com todos os dados de
-            veículo, propulsão e CNH/EAR, e aprove ou bloqueie com um clique.
+            Gerencie usuários Pessoa Física (PF), Lojistas (PJ) e Entregadores /
+            Motoristas com todos os dados de CPF/CNPJ, veículo e aprovações.
           </p>
         </div>
 
@@ -1011,36 +1116,99 @@ export function AdminPanel({
 
       {/* Approval Queue & All Profiles */}
       <section className="space-y-4">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
           <div>
             <h2 className="font-display text-xl font-semibold text-zinc-900">
-              Gestão de Cadastros e Aprovações
+              Gestão de Usuários e Aprovações
             </h2>
             <p className="text-xs text-zinc-500">
-              Entregadores aprovados ficam imediatamente disponíveis no Mural do Entregador.
+              Visualize, filtre, edite ou exclua cadastros de Pessoa Física (PF),
+              Lojistas (PJ) e Entregadores / Motoristas.
             </p>
+          </div>
+
+          <div className="relative w-full lg:w-80">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
+              aria-hidden="true"
+            />
+            <input
+              type="text"
+              value={profileSearch}
+              onChange={(e) => setProfileSearch(e.target.value)}
+              placeholder="Buscar por nome, CPF, CNPJ ou telefone..."
+              className="w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+            />
+          </div>
+        </div>
+
+        {/* Dedicated Profile Type Filter + Status Filter */}
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-1 rounded-lg bg-zinc-100 p-1 overflow-x-auto">
+            {(
+              [
+                {
+                  value: 'Todos',
+                  label: `Todos (${profileCategoryCounts.all})`,
+                },
+                {
+                  value: 'PF',
+                  label: `Pessoa Física (PF) (${profileCategoryCounts.pf})`,
+                },
+                {
+                  value: 'PJ',
+                  label: `Lojistas / PJ (${profileCategoryCounts.pj})`,
+                },
+                {
+                  value: 'Entregador',
+                  label: `Entregadores / Motoristas (${profileCategoryCounts.entregador})`,
+                },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.value}
+                type="button"
+                onClick={() => setProfileTypeFilter(tab.value)}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
+                  profileTypeFilter === tab.value
+                    ? 'bg-zinc-900 text-white shadow-xs font-semibold'
+                    : 'text-zinc-600 hover:text-zinc-900'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
           <div className="flex items-center gap-1 rounded-lg bg-zinc-100 p-1 overflow-x-auto">
             {(
               [
-                'Aguardando Aprovação',
-                'Aprovado',
-                'Bloqueado',
-                'Todos',
+                { value: 'Todos', label: `Todos (${statusCounts.all})` },
+                {
+                  value: 'Aguardando Aprovação',
+                  label: `Pendentes (${statusCounts.pending})`,
+                },
+                {
+                  value: 'Aprovado',
+                  label: `Aprovados (${statusCounts.approved})`,
+                },
+                {
+                  value: 'Bloqueado',
+                  label: `Bloqueados (${statusCounts.blocked})`,
+                },
               ] as const
             ).map((st) => (
               <button
-                key={st}
+                key={st.value}
                 type="button"
-                onClick={() => setStatusFilter(st)}
+                onClick={() => setStatusFilter(st.value)}
                 className={`rounded-md px-3 py-1.5 text-xs font-medium transition-colors whitespace-nowrap shrink-0 ${
-                  statusFilter === st
-                    ? 'bg-white text-zinc-900 shadow-xs'
+                  statusFilter === st.value
+                    ? 'bg-white text-zinc-900 shadow-xs font-semibold'
                     : 'text-zinc-600 hover:text-zinc-900'
                 }`}
               >
-                {st}
+                {st.label}
               </button>
             ))}
           </div>
@@ -1053,22 +1221,28 @@ export function AdminPanel({
               aria-hidden="true"
             />
             <p className="text-sm font-medium text-zinc-900">
-              Nenhum perfil com o status &ldquo;{statusFilter}&rdquo;.
+              Nenhum usuário encontrado para os filtros selecionados.
             </p>
             <p className="text-xs text-zinc-500">
-              Novos cadastros feitos na aba &ldquo;Cadastro e Perfis&rdquo; aparecerão
-              aqui.
+              Ajuste o filtro de tipo de perfil, status ou busca para visualizar
+              outros cadastros.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4">
-            {filteredProfiles.map((profile) => (
+            {filteredProfiles.map((profile) => {
+              const category = getProfileCategory(profile);
+              const isPj = category === 'pj';
+              const isPfSolicitante = category === 'pf';
+              const isDriver = category === 'entregador';
+
+              return (
               <article
                 key={profile.id}
                 className="rounded-xl border border-zinc-200 bg-white p-5 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between"
               >
                 <div className="space-y-2.5">
-                  <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="flex flex-wrap items-center gap-2">
                     <h3 className="font-display text-base font-semibold text-zinc-900">
                       {profile.businessName || profile.name}
                     </h3>
@@ -1076,20 +1250,30 @@ export function AdminPanel({
                       avg={profile.ratingAvg}
                       count={profile.ratingCount}
                     />
-                    {profile.personType && (
-                      <span
-                        className={`inline-flex items-center rounded-md border px-2 py-0.5 font-mono text-[11px] font-semibold ${
-                          profile.personType === 'PJ'
-                            ? 'border-sky-200 bg-sky-50 text-sky-800'
-                            : 'border-zinc-200 bg-zinc-100 text-zinc-700'
-                        }`}
-                      >
-                        {profile.personType}
+                    {isPfSolicitante && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-indigo-200 bg-indigo-50 px-2.5 py-0.5 text-[11px] font-semibold text-indigo-800">
+                        <User className="h-3 w-3" aria-hidden="true" />
+                        <span>Pessoa Física (PF)</span>
+                      </span>
+                    )}
+                    {isPj && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-sky-200 bg-sky-50 px-2.5 py-0.5 text-[11px] font-semibold text-sky-800">
+                        <Store className="h-3 w-3" aria-hidden="true" />
+                        <span>Lojista / Empresa (PJ)</span>
+                      </span>
+                    )}
+                    {isDriver && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-800">
+                        <span>Entregador / Motorista (PF)</span>
+                      </span>
+                    )}
+                    {category === 'admin' && (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-zinc-300 bg-zinc-900 px-2.5 py-0.5 text-[11px] font-semibold text-white">
+                        <span>Admin</span>
                       </span>
                     )}
                     <ApprovalStatusBadge status={profile.approvalStatus} />
-                    {(profile.role === 'entregador' ||
-                      profile.role === 'motorista') &&
+                    {isDriver &&
                       profile.approvalStatus === 'Aprovado' && (
                         <span
                           className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[11px] font-semibold ${
@@ -1125,16 +1309,16 @@ export function AdminPanel({
                     </p>
                     <p>
                       <span className="text-zinc-400">
-                        {profile.personType === 'PJ' ? 'CNPJ (PJ):' : 'CPF (PF):'}
+                        {isPj ? 'CNPJ (PJ):' : 'CPF (PF):'}
                       </span>{' '}
                       <span className="font-mono text-zinc-800 tabular-nums">
                         {formatCpfOrCnpj(
                           profile.documentNumber || profile.document,
-                          profile.personType
+                          isPj ? 'PJ' : 'PF'
                         ) || 'Não informado'}
                       </span>
                     </p>
-                    {profile.personType === 'PJ' && profile.companyLegalName && (
+                    {isPj && profile.companyLegalName && (
                       <p>
                         <span className="text-zinc-400">Razão Social:</span>{' '}
                         <span className="text-zinc-800">
@@ -1146,6 +1330,12 @@ export function AdminPanel({
                       <span className="text-zinc-400">Telefone:</span>{' '}
                       <span className="font-mono text-zinc-800">{profile.phone}</span>
                     </p>
+                    {profile.email && (
+                      <p>
+                        <span className="text-zinc-400">E-mail:</span>{' '}
+                        <span className="text-zinc-800">{profile.email}</span>
+                      </p>
+                    )}
                     <p>
                       <span className="text-zinc-400">Bairro POA:</span>{' '}
                       <span className="text-zinc-800">{profile.neighborhood}</span>
@@ -1174,7 +1364,7 @@ export function AdminPanel({
                       </p>
                     )}
 
-                    {(profile.cnhNumber || profile.hasEar !== undefined) && (
+                    {isDriver && (
                       <p>
                         <span className="text-zinc-400">CNH / EAR:</span>{' '}
                         <span className="font-mono text-zinc-800">
@@ -1204,8 +1394,16 @@ export function AdminPanel({
                   </div>
                 </div>
 
-                {/* One-click Approval / Block + Edit & Delete Actions */}
+                {/* View Details + Approval / Block + Edit & Delete Actions */}
                 <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setViewingProfile(profile)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 whitespace-nowrap"
+                  >
+                    <Eye className="h-3.5 w-3.5 text-zinc-500" aria-hidden="true" />
+                    <span>Detalhes</span>
+                  </button>
                   {profile.approvalStatus !== 'Aprovado' && (
                     <button
                       type="button"
@@ -1216,16 +1414,17 @@ export function AdminPanel({
                       <span>Aprovar</span>
                     </button>
                   )}
-                  {profile.approvalStatus !== 'Bloqueado' && (
-                    <button
-                      type="button"
-                      onClick={() => onUpdateApproval(profile.id, 'Bloqueado')}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 transition-colors hover:bg-amber-100 whitespace-nowrap"
-                    >
-                      <Ban className="h-3.5 w-3.5" aria-hidden="true" />
-                      <span>Bloquear</span>
-                    </button>
-                  )}
+                  {profile.approvalStatus !== 'Bloqueado' &&
+                    profile.id !== currentAdminId && (
+                      <button
+                        type="button"
+                        onClick={() => onUpdateApproval(profile.id, 'Bloqueado')}
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-amber-200 bg-amber-50 px-3.5 py-2 text-xs font-semibold text-amber-800 transition-colors hover:bg-amber-100 whitespace-nowrap"
+                      >
+                        <Ban className="h-3.5 w-3.5" aria-hidden="true" />
+                        <span>Bloquear</span>
+                      </button>
+                    )}
                   <button
                     type="button"
                     onClick={() => openEditModal(profile)}
@@ -1257,7 +1456,8 @@ export function AdminPanel({
                   )}
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         )}
       </section>
@@ -1446,7 +1646,9 @@ export function AdminPanel({
                     onChange={(e) => setEditRole(e.target.value as UserRole)}
                     className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
                   >
-                    <option value="lojista">lojista (Solicitante / Loja)</option>
+                    <option value="lojista">
+                      lojista (Pessoa Física PF ou Lojista PJ)
+                    </option>
                     <option value="entregador">entregador</option>
                     <option value="motorista">motorista</option>
                     <option value="admin">admin</option>
@@ -1667,6 +1869,166 @@ export function AdminPanel({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Visualização de Detalhes do Usuário */}
+      {viewingProfile && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="admin-view-user-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/70 p-4 overflow-y-auto"
+          onClick={() => setViewingProfile(null)}
+        >
+          <div
+            className="my-auto w-full max-w-xl rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-zinc-200 px-5 py-4 bg-zinc-50/70">
+              <div className="space-y-0.5">
+                <h2
+                  id="admin-view-user-title"
+                  className="font-display text-base font-bold text-zinc-900"
+                >
+                  {viewingProfile.businessName || viewingProfile.name}
+                </h2>
+                <p className="text-xs text-zinc-500">
+                  {roleLabel(viewingProfile)}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingProfile(null)}
+                aria-label="Fechar detalhes"
+                className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-200/70 hover:text-zinc-900"
+              >
+                <X className="h-4 w-4" aria-hidden="true" />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <ApprovalStatusBadge status={viewingProfile.approvalStatus} />
+                <RatingBadge
+                  avg={viewingProfile.ratingAvg}
+                  count={viewingProfile.ratingCount}
+                />
+                {viewingProfile.twoFactorEnabled && (
+                  <span className="inline-flex items-center rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-800">
+                    2FA Ativo
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 rounded-xl border border-zinc-200 bg-zinc-50/70 p-4 sm:grid-cols-2">
+                <div>
+                  <p className="text-zinc-400">Nome / Responsável</p>
+                  <p className="font-semibold text-zinc-900 mt-0.5">
+                    {viewingProfile.name}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-zinc-400">
+                    {getProfileCategory(viewingProfile) === 'pj'
+                      ? 'CNPJ (Pessoa Jurídica)'
+                      : 'CPF (Pessoa Física)'}
+                  </p>
+                  <p className="font-mono font-semibold text-zinc-900 mt-0.5 tabular-nums">
+                    {formatCpfOrCnpj(
+                      viewingProfile.documentNumber || viewingProfile.document,
+                      getProfileCategory(viewingProfile) === 'pj' ? 'PJ' : 'PF'
+                    ) || 'Não informado'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-zinc-400">Telefone / Login</p>
+                  <p className="font-mono text-zinc-900 mt-0.5">
+                    {viewingProfile.phone}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-zinc-400">E-mail</p>
+                  <p className="text-zinc-900 mt-0.5">
+                    {viewingProfile.email || 'Não informado'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-zinc-400">Chave Pix</p>
+                  <p className="font-mono text-zinc-900 mt-0.5">
+                    {viewingProfile.pixKey || 'Não cadastrada'}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-zinc-400">Data de Cadastro</p>
+                  <p className="font-mono text-zinc-900 mt-0.5 tabular-nums">
+                    {formatDateTimeBR(viewingProfile.createdAt)}
+                  </p>
+                </div>
+                {viewingProfile.companyLegalName && (
+                  <div className="sm:col-span-2">
+                    <p className="text-zinc-400">Razão Social (PJ)</p>
+                    <p className="text-zinc-900 mt-0.5">
+                      {viewingProfile.companyLegalName}
+                    </p>
+                  </div>
+                )}
+                {viewingProfile.vehicleType && (
+                  <div className="sm:col-span-2">
+                    <p className="text-zinc-400">Veículo &amp; Propulsão</p>
+                    <p className="text-zinc-900 mt-0.5">
+                      {viewingProfile.vehicleType} ·{' '}
+                      {viewingProfile.propulsion || 'Padrão'}
+                      {viewingProfile.vehicleType === 'Bike'
+                        ? ` · Raio: ${
+                            viewingProfile.bikeMaxRadiusKm === null
+                              ? 'Sem limite'
+                              : `${viewingProfile.bikeMaxRadiusKm ?? 3} km`
+                          }`
+                        : ''}
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-100 pt-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = viewingProfile;
+                    setViewingProfile(null);
+                    openEditModal(target);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3.5 py-2 font-semibold text-zinc-800 hover:bg-zinc-50"
+                >
+                  <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>Editar Cadastro</span>
+                </button>
+                {viewingProfile.id !== currentAdminId && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const target = viewingProfile;
+                      setViewingProfile(null);
+                      setDeleteError(null);
+                      setDeletingProfile(target);
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3.5 py-2 font-semibold text-red-700 hover:bg-red-100"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Excluir</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setViewingProfile(null)}
+                  className="rounded-lg bg-zinc-900 px-4 py-2 font-semibold text-white hover:bg-zinc-800"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}
