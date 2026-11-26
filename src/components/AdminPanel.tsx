@@ -5,7 +5,10 @@ import {
   CheckCircle2,
   Copy,
   Database,
+  Download,
   Eye,
+  Mail,
+  MailCheck,
   Pencil,
   QrCode,
   RefreshCw,
@@ -45,6 +48,14 @@ import {
   isValidCpf,
   onlyDigits,
 } from '../utils/documentValidation';
+import {
+  exportAuthorizedEmailsCsv,
+  isValidEmail,
+} from '../utils/emailValidation';
+import {
+  formatPickupCode,
+  normalizeCodeSearchQuery,
+} from '../utils/pickupCode';
 import { formatBRL, formatDateTimeBR, isZeroFeePropulsion } from '../utils/pricing';
 import {
   BIKE_RADIUS_OPTIONS,
@@ -119,6 +130,7 @@ export function AdminPanel({
   const [profileTypeFilter, setProfileTypeFilter] =
     useState<AdminProfileTypeFilter>('Todos');
   const [profileSearch, setProfileSearch] = useState('');
+  const [orderSearch, setOrderSearch] = useState('');
   const [paymentFilter, setPaymentFilter] = useState<'Todos' | PaymentStatus>(
     'Todos'
   );
@@ -140,6 +152,7 @@ export function AdminPanel({
   const [editName, setEditName] = useState('');
   const [editPhone, setEditPhone] = useState('');
   const [editEmail, setEditEmail] = useState('');
+  const [editAcceptsMarketing, setEditAcceptsMarketing] = useState(false);
   const [editRole, setEditRole] = useState<UserRole>('entregador');
   const [editPersonType, setEditPersonType] = useState<PersonType>('PF');
   const [editDocument, setEditDocument] = useState('');
@@ -154,6 +167,12 @@ export function AdminPanel({
   const [editHasEar, setEditHasEar] = useState(false);
   const [editError, setEditError] = useState<string | null>(null);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  // CSV Export feedback state
+  const [exportCsvFeedback, setExportCsvFeedback] = useState<{
+    type: 'ok' | 'info';
+    text: string;
+  } | null>(null);
 
   // View Details Modal state
   const [viewingProfile, setViewingProfile] = useState<Profile | null>(null);
@@ -273,6 +292,31 @@ export function AdminPanel({
     return { all: profiles.length, pending, approved, blocked };
   }, [profiles]);
 
+  const marketingOptInCount = useMemo(
+    () =>
+      profiles.filter(
+        (p) => Boolean(p.acceptsMarketing) && Boolean(p.email && p.email.trim())
+      ).length,
+    [profiles]
+  );
+
+  const handleExportAuthorizedEmails = () => {
+    const result = exportAuthorizedEmailsCsv(profiles);
+    if (result.count === 0) {
+      setExportCsvFeedback({
+        type: 'info',
+        text: 'Nenhum usuário com e-mail cadastrado optou por receber comunicações até o momento.',
+      });
+    } else {
+      setExportCsvFeedback({
+        type: 'ok',
+        text: `Lista exportada com ${result.count} ${
+          result.count === 1 ? 'e-mail autorizado' : 'e-mails autorizados'
+        } (${result.filename}).`,
+      });
+    }
+  };
+
   const filteredProfiles = useMemo(() => {
     const query = profileSearch.trim().toLowerCase();
     const queryDigits = onlyDigits(profileSearch);
@@ -312,6 +356,37 @@ export function AdminPanel({
     });
   }, [profiles, statusFilter, profileTypeFilter, profileSearch]);
 
+  const filteredAdminOrders = useMemo(() => {
+    const raw = orderSearch.trim().toLowerCase();
+    if (!raw) return orders;
+    const normalizedCode = normalizeCodeSearchQuery(orderSearch);
+    return orders.filter((order) => {
+      if (
+        order.code.toLowerCase().includes(raw) ||
+        normalizeCodeSearchQuery(order.code).includes(normalizedCode)
+      ) {
+        return true;
+      }
+      if (
+        order.stops.some((s) => {
+          const pkgCode = s.pickupCode || formatPickupCode(s.id);
+          return (
+            pkgCode.toLowerCase().includes(raw) ||
+            normalizeCodeSearchQuery(pkgCode).includes(normalizedCode)
+          );
+        })
+      ) {
+        return true;
+      }
+      return (
+        order.merchantName.toLowerCase().includes(raw) ||
+        order.pickupNeighborhood.toLowerCase().includes(raw) ||
+        order.destinationNeighborhood.toLowerCase().includes(raw) ||
+        (order.assignedCourierName || '').toLowerCase().includes(raw)
+      );
+    });
+  }, [orders, orderSearch]);
+
   const handleSaveOfficialPix = async (e: React.FormEvent) => {
     e.preventDefault();
     setOfficialPixMsg(null);
@@ -348,6 +423,7 @@ export function AdminPanel({
     setEditName(profile.name || '');
     setEditPhone(profile.phone || '');
     setEditEmail(profile.email || '');
+    setEditAcceptsMarketing(Boolean(profile.acceptsMarketing));
     setEditRole(profile.role);
     const inferredPersonType: PersonType =
       profile.personType ||
@@ -414,6 +490,11 @@ export function AdminPanel({
       }
     }
 
+    if (editEmail.trim() && !isValidEmail(editEmail)) {
+      setEditError('Informe um e-mail válido (ex.: nome@dominio.com) ou deixe em branco.');
+      return;
+    }
+
     if (editAccessPin.trim() && !/^\d{4}$/.test(editAccessPin.trim())) {
       setEditError('O novo PIN deve conter exatamente 4 dígitos numéricos.');
       return;
@@ -426,6 +507,7 @@ export function AdminPanel({
         name: editName.trim(),
         phone: editPhone.trim(),
         email: editEmail.trim(),
+        acceptsMarketing: editAcceptsMarketing,
         role: editRole,
         personType: editPersonType,
         documentNumber: editDocument,
@@ -1127,20 +1209,54 @@ export function AdminPanel({
             </p>
           </div>
 
-          <div className="relative w-full lg:w-80">
-            <Search
-              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
-              aria-hidden="true"
-            />
-            <input
-              type="text"
-              value={profileSearch}
-              onChange={(e) => setProfileSearch(e.target.value)}
-              placeholder="Buscar por nome, CPF, CNPJ ou telefone..."
-              className="w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
-            />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={handleExportAuthorizedEmails}
+              className="inline-flex items-center justify-center gap-2 rounded-lg border border-emerald-200 bg-emerald-50 px-3.5 py-2 text-xs font-semibold text-emerald-800 transition-colors hover:bg-emerald-100 whitespace-nowrap"
+            >
+              <Download className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+              <span>Exportar Lista de E-mails Autorizados (CSV)</span>
+              <span className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] font-bold text-emerald-700 border border-emerald-200">
+                {marketingOptInCount}
+              </span>
+            </button>
+
+            <div className="relative w-full sm:w-72">
+              <Search
+                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
+                aria-hidden="true"
+              />
+              <input
+                type="text"
+                value={profileSearch}
+                onChange={(e) => setProfileSearch(e.target.value)}
+                placeholder="Buscar por nome, e-mail, CPF, CNPJ ou telefone..."
+                className="w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+              />
+            </div>
           </div>
         </div>
+
+        {exportCsvFeedback && (
+          <div
+            className={`flex items-center justify-between gap-2 rounded-lg border px-3.5 py-2 text-xs font-medium ${
+              exportCsvFeedback.type === 'ok'
+                ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
+                : 'border-amber-200 bg-amber-50 text-amber-800'
+            }`}
+          >
+            <span>{exportCsvFeedback.text}</span>
+            <button
+              type="button"
+              onClick={() => setExportCsvFeedback(null)}
+              aria-label="Fechar aviso de exportação"
+              className="rounded p-0.5 hover:bg-black/5"
+            >
+              <X className="h-3.5 w-3.5" aria-hidden="true" />
+            </button>
+          </div>
+        )}
 
         {/* Dedicated Profile Type Filter + Status Filter */}
         <div className="flex flex-col gap-2.5 lg:flex-row lg:items-center lg:justify-between">
@@ -1294,6 +1410,17 @@ export function AdminPanel({
                     {profile.propulsion && (
                       <PropulsionTag propulsion={profile.propulsion} />
                     )}
+                    {profile.acceptsMarketing ? (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-800">
+                        <MailCheck className="h-3 w-3" aria-hidden="true" />
+                        <span>Recebe e-mails</span>
+                      </span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1 rounded-md border border-zinc-200 bg-zinc-50 px-2 py-0.5 text-[11px] font-medium text-zinc-500">
+                        <Mail className="h-3 w-3" aria-hidden="true" />
+                        <span>Não optou</span>
+                      </span>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 gap-x-6 gap-y-1 text-xs text-zinc-600 sm:grid-cols-2 lg:grid-cols-3">
@@ -1330,12 +1457,12 @@ export function AdminPanel({
                       <span className="text-zinc-400">Telefone:</span>{' '}
                       <span className="font-mono text-zinc-800">{profile.phone}</span>
                     </p>
-                    {profile.email && (
-                      <p>
-                        <span className="text-zinc-400">E-mail:</span>{' '}
-                        <span className="text-zinc-800">{profile.email}</span>
-                      </p>
-                    )}
+                    <p>
+                      <span className="text-zinc-400">E-mail:</span>{' '}
+                      <span className="text-zinc-800">
+                        {profile.email || 'Não informado'}
+                      </span>
+                    </p>
                     <p>
                       <span className="text-zinc-400">Bairro POA:</span>{' '}
                       <span className="text-zinc-800">{profile.neighborhood}</span>
@@ -1464,14 +1591,31 @@ export function AdminPanel({
 
       {/* Demo & Active Orders Overview in Porto Alegre */}
       <section className="space-y-4">
-        <div>
-          <h2 className="font-display text-xl font-semibold text-zinc-900">
-            Pedidos de Demonstração e Operação em Porto Alegre
-          </h2>
-          <p className="text-xs text-zinc-500">
-            Cenário pronto para testes: Centro Histórico → Menino Deus (Rápida) e Moinhos
-            de Vento → Cidade Baixa (Rota Consolidada).
-          </p>
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h2 className="font-display text-xl font-semibold text-zinc-900">
+              Pedidos e Corridas em Porto Alegre
+            </h2>
+            <p className="text-xs text-zinc-500">
+              Acompanhe todas as corridas pelo código único #RS-XXXX, trajeto,
+              entregador e repasse.
+            </p>
+          </div>
+
+          <div className="relative w-full sm:w-80">
+            <Search
+              className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
+              aria-hidden="true"
+            />
+            <input
+              type="search"
+              value={orderSearch}
+              onChange={(e) => setOrderSearch(e.target.value)}
+              placeholder="Buscar por código #RS-XXXX, bairro ou nome..."
+              aria-label="Buscar corridas por código #RS-XXXX, bairro ou usuário"
+              className="w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+            />
+          </div>
         </div>
 
         <div className="overflow-x-auto rounded-xl border border-zinc-200 bg-white">
@@ -1488,55 +1632,83 @@ export function AdminPanel({
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100">
-              {orders.map((order) => (
-                <tr key={order.id} className="hover:bg-zinc-50/70">
-                  <td className="px-4 py-3 font-mono font-semibold text-zinc-900 whitespace-nowrap">
-                    {order.code}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-700 whitespace-nowrap">
-                    {order.type === 'rapida'
-                      ? `Rápida (${order.distanceKm?.toLocaleString('pt-BR')} km)`
-                      : order.type === 'frete'
-                      ? `Frete Utilitário (${order.distanceKm?.toLocaleString('pt-BR')} km)`
-                      : `Rota (${order.packageCount} pct)`}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-800">
-                    {order.pickupNeighborhood} → {order.destinationNeighborhood}
-                  </td>
-                  <td className="px-4 py-3 text-zinc-700">
-                    {order.assignedCourierName ? (
-                      <span className="inline-flex flex-wrap items-center gap-1.5">
-                        <span>{order.assignedCourierName}</span>
-                        <RatingBadge
-                          avg={order.assignedCourierRatingAvg}
-                          count={order.assignedCourierRatingCount}
-                          compact
-                        />
-                        <PropulsionTag propulsion={order.assignedCourierPropulsion} />
-                      </span>
-                    ) : (
-                      <span className="text-zinc-400">Aguardando aceite</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono font-semibold text-zinc-900 tabular-nums whitespace-nowrap">
-                    {formatBRL(order.grossTotal)}
-                  </td>
-                  <td className="px-4 py-3 text-right font-mono tabular-nums whitespace-nowrap">
-                    {isZeroFeePropulsion(order.assignedCourierPropulsion) ? (
-                      <span className="text-emerald-700 font-medium">
-                        Taxa R$ 0,00 · +{formatBRL(order.evBonusApplied ?? 0)}
-                      </span>
-                    ) : (
-                      <span className="text-zinc-600">
-                        Taxa {formatBRL(order.standardPlatformFee)}
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 whitespace-nowrap">
-                    <OrderStatusBadge status={order.status} />
+              {filteredAdminOrders.length === 0 ? (
+                <tr>
+                  <td
+                    colSpan={7}
+                    className="px-4 py-8 text-center text-xs text-zinc-500"
+                  >
+                    Nenhuma corrida encontrada para &ldquo;{orderSearch}&rdquo;.
                   </td>
                 </tr>
-              ))}
+              ) : (
+                filteredAdminOrders.map((order) => (
+                  <tr key={order.id} className="hover:bg-zinc-50/70">
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <span className="inline-flex items-center rounded-md border border-amber-300 bg-amber-50 px-2 py-0.5 font-mono font-bold text-zinc-950">
+                        {order.code}
+                      </span>
+                      {order.type === 'rota' && order.stops.length > 0 && (
+                        <div className="mt-1 flex flex-wrap gap-1">
+                          {order.stops.map((st) => (
+                            <span
+                              key={st.id}
+                              className="rounded bg-zinc-100 px-1 py-0.5 font-mono text-[10px] text-zinc-600"
+                            >
+                              {st.pickupCode || formatPickupCode(st.id)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-zinc-700 whitespace-nowrap">
+                      {order.type === 'rapida'
+                        ? `Rápida (${order.distanceKm?.toLocaleString('pt-BR')} km)`
+                        : order.type === 'frete'
+                        ? `Frete Utilitário (${order.distanceKm?.toLocaleString('pt-BR')} km)`
+                        : `Rota (${order.packageCount} pct)`}
+                    </td>
+                    <td className="px-4 py-3 text-zinc-800">
+                      <span className="font-medium">{order.merchantName}</span>
+                      <span className="block text-[11px] text-zinc-500">
+                        {order.pickupNeighborhood} → {order.destinationNeighborhood}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-zinc-700">
+                      {order.assignedCourierName ? (
+                        <span className="inline-flex flex-wrap items-center gap-1.5">
+                          <span>{order.assignedCourierName}</span>
+                          <RatingBadge
+                            avg={order.assignedCourierRatingAvg}
+                            count={order.assignedCourierRatingCount}
+                            compact
+                          />
+                          <PropulsionTag propulsion={order.assignedCourierPropulsion} />
+                        </span>
+                      ) : (
+                        <span className="text-zinc-400">Aguardando aceite</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono font-semibold text-zinc-900 tabular-nums whitespace-nowrap">
+                      {formatBRL(order.grossTotal)}
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono tabular-nums whitespace-nowrap">
+                      {isZeroFeePropulsion(order.assignedCourierPropulsion) ? (
+                        <span className="text-emerald-700 font-medium">
+                          Taxa R$ 0,00 · +{formatBRL(order.evBonusApplied ?? 0)}
+                        </span>
+                      ) : (
+                        <span className="text-zinc-600">
+                          Taxa {formatBRL(order.standardPlatformFee)}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap">
+                      <OrderStatusBadge status={order.status} />
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
@@ -1748,6 +1920,20 @@ export function AdminPanel({
                     className="w-full sm:w-56 rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-sm text-zinc-900 focus:border-emerald-600 focus:outline-none"
                   />
                 </div>
+
+                <div className="sm:col-span-2">
+                  <label className="flex items-center gap-2.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2.5 cursor-pointer text-xs text-zinc-800">
+                    <input
+                      type="checkbox"
+                      checked={editAcceptsMarketing}
+                      onChange={(e) => setEditAcceptsMarketing(e.target.checked)}
+                      className="h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600"
+                    />
+                    <span>
+                      Optou por receber novidades e dicas operacionais por e-mail (LGPD)
+                    </span>
+                  </label>
+                </div>
               </div>
 
               {(editRole === 'entregador' || editRole === 'motorista') && (
@@ -1949,9 +2135,22 @@ export function AdminPanel({
                   </p>
                 </div>
                 <div>
-                  <p className="text-zinc-400">E-mail</p>
-                  <p className="text-zinc-900 mt-0.5">
+                  <p className="text-zinc-400">E-mail & Consentimento</p>
+                  <p className="text-zinc-900 mt-0.5 break-all">
                     {viewingProfile.email || 'Não informado'}
+                  </p>
+                  <p className="mt-1">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
+                        viewingProfile.acceptsMarketing
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-zinc-200 text-zinc-600'
+                      }`}
+                    >
+                      {viewingProfile.acceptsMarketing
+                        ? 'Recebe e-mails'
+                        : 'Não optou'}
+                    </span>
                   </p>
                 </div>
                 <div>

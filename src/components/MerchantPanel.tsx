@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Hash,
   MapPin,
   Package,
   PackageCheck,
@@ -53,6 +54,10 @@ import {
   isZeroFeePropulsion,
   PRICING_RULES,
 } from '../utils/pricing';
+import {
+  formatPickupCode,
+  normalizeCodeSearchQuery,
+} from '../utils/pickupCode';
 import {
   formatPickupScheduleLabel,
   getTodayDateInputValue,
@@ -651,9 +656,11 @@ export function MerchantPanel({
               destNeighborhoodValue,
               1
             );
+      const stopId = crypto.randomUUID();
       stops = [
         {
-          id: crypto.randomUUID(),
+          id: stopId,
+          pickupCode: formatPickupCode(stopId),
           sequence: 1,
           address: singleDestinationFormatted,
           neighborhood: destNeighborhoodValue,
@@ -688,8 +695,10 @@ export function MerchantPanel({
           draft.addressData.lng !== undefined
             ? { lat: draft.addressData.lat, lng: draft.addressData.lng }
             : resolvePortoAlegreCoordinates(formatted, nb, idx + 1);
+        const stopId = crypto.randomUUID();
         return {
-          id: crypto.randomUUID(),
+          id: stopId,
+          pickupCode: formatPickupCode(stopId),
           sequence: idx + 1,
           address: formatted,
           neighborhood: nb,
@@ -719,10 +728,10 @@ export function MerchantPanel({
             0
           );
 
-    const nextNumber = 1041 + orders.length;
+    const newOrderId = crypto.randomUUID();
     const newOrder: Order = {
-      id: crypto.randomUUID(),
-      code: `RJ-${nextNumber}`,
+      id: newOrderId,
+      code: formatPickupCode(newOrderId),
       type: orderType,
       flowDirection,
       pickupSchedule,
@@ -780,8 +789,17 @@ export function MerchantPanel({
       }
       if (searchQuery.trim()) {
         const q = searchQuery.toLowerCase();
+        const normalizedCodeQuery = normalizeCodeSearchQuery(searchQuery);
         return (
           order.code.toLowerCase().includes(q) ||
+          normalizeCodeSearchQuery(order.code).includes(normalizedCodeQuery) ||
+          order.stops.some((s) => {
+            const code = s.pickupCode || formatPickupCode(s.id);
+            return (
+              code.toLowerCase().includes(q) ||
+              normalizeCodeSearchQuery(code).includes(normalizedCodeQuery)
+            );
+          }) ||
           order.merchantName.toLowerCase().includes(q) ||
           order.pickupNeighborhood.toLowerCase().includes(q) ||
           order.destinationNeighborhood.toLowerCase().includes(q) ||
@@ -1805,8 +1823,8 @@ export function MerchantPanel({
                 type="search"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Buscar código ou bairro..."
-                aria-label="Buscar pedidos por código ou bairro"
+                placeholder="Buscar #RS-XXXX ou bairro..."
+                aria-label="Buscar pedidos por código #RS-XXXX ou bairro"
                 className="w-full sm:w-56 rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-1.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
               />
             </div>
@@ -1975,6 +1993,45 @@ export function MerchantPanel({
                       </div>
                     </div>
                   </div>
+
+                  {/* Código Único de Retirada em Destaque (#RS-XXXX) para Pedido Ativo */}
+                  {order.status !== 'Entregue' && (
+                    <div className="mt-4 rounded-xl border-2 border-amber-300 bg-amber-50/80 p-3.5 space-y-2">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <span className="inline-flex items-center gap-1 rounded-md bg-zinc-950 px-2.5 py-1 font-mono text-sm sm:text-base font-black tracking-wider text-white">
+                            <Hash className="h-3.5 w-3.5 text-amber-400" aria-hidden="true" />
+                            <span>{order.code.replace(/^#/, '')}</span>
+                          </span>
+                          <span className="text-xs font-semibold text-zinc-900">
+                            Código de Retirada
+                          </span>
+                        </div>
+                        <p className="text-xs font-medium text-amber-950 italic">
+                          &ldquo;Anote ou identifique o pacote com este código para conferir na retirada&rdquo;
+                        </p>
+                      </div>
+
+                      {order.type === 'rota' && order.stops.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-1.5 border-t border-amber-200/80 pt-2 text-[11px]">
+                          <span className="font-semibold text-amber-950 mr-1">
+                            Pacotes:
+                          </span>
+                          {order.stops.map((stop) => (
+                            <span
+                              key={stop.id}
+                              className="inline-flex items-center gap-1 rounded border border-amber-300 bg-white px-2 py-0.5 text-zinc-800"
+                            >
+                              <span>#{stop.sequence}:</span>
+                              <strong className="font-mono text-zinc-950">
+                                {stop.pickupCode || formatPickupCode(stop.id)}
+                              </strong>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Financial Pix Card when order is accepted (Em Rota / Entregue) */}
                   {order.status !== 'Aguardando' && (
@@ -2230,6 +2287,11 @@ export function MerchantPanel({
                                 <span className="font-mono text-zinc-500 mr-1.5">
                                   #{stop.sequence}
                                 </span>
+                                {order.type === 'rota' && (
+                                  <span className="mr-1.5 rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[11px] font-bold text-zinc-900">
+                                    {stop.pickupCode || formatPickupCode(stop.id)}
+                                  </span>
+                                )}
                                 {stop.address}
                               </p>
                               <p className="text-zinc-500">

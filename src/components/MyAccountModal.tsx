@@ -25,6 +25,7 @@ import {
 } from '../lib/supabaseService';
 import { PixKeyType, Profile } from '../types';
 import { formatCpfOrCnpj } from '../utils/documentValidation';
+import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
 import {
   getPixKeyPlaceholder,
   inferPixKeyType,
@@ -46,6 +47,9 @@ export function MyAccountModal({
   // Basic Info State (Name + Email)
   const [nameInput, setNameInput] = useState(currentUser.name);
   const [emailInput, setEmailInput] = useState(currentUser.email || '');
+  const [acceptsMarketingInput, setAcceptsMarketingInput] = useState(
+    Boolean(currentUser.acceptsMarketing)
+  );
   const [isSavingBasic, setIsSavingBasic] = useState(false);
   const [basicMsg, setBasicMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(
     null
@@ -133,17 +137,26 @@ export function MyAccountModal({
       return;
     }
 
+    if (emailInput.trim() && !isValidEmail(emailInput)) {
+      setBasicMsg({
+        type: 'err',
+        text: 'Informe um endereço de e-mail válido (ex.: nome@dominio.com).',
+      });
+      return;
+    }
+
     setIsSavingBasic(true);
     try {
       const updated = await updateBasicAccountInfoInSupabase({
         profileId: currentUser.id,
         name: nameInput,
-        email: emailInput,
+        email: emailInput.trim() ? normalizeEmail(emailInput) : '',
+        acceptsMarketing: acceptsMarketingInput,
       });
       onProfileUpdated(updated, 'Dados de perfil e e-mail salvos no Supabase.');
       setBasicMsg({
         type: 'ok',
-        text: 'Nome e e-mail de recuperação atualizados com sucesso.',
+        text: 'Nome, e-mail e preferência de comunicação atualizados com sucesso.',
       });
     } catch (err) {
       setBasicMsg({
@@ -563,6 +576,19 @@ export function MyAccountModal({
                 </div>
               </div>
             </div>
+
+            <label className="flex items-start gap-2.5 rounded-lg border border-zinc-200 bg-zinc-50/70 px-3.5 py-2.5 cursor-pointer text-xs text-zinc-700 leading-relaxed">
+              <input
+                type="checkbox"
+                checked={acceptsMarketingInput}
+                onChange={(e) => setAcceptsMarketingInput(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600 shrink-0"
+              />
+              <span>
+                Aceito receber novidades, dicas operacionais e atualizações do
+                RotaJusta por e-mail
+              </span>
+            </label>
 
             {/* Locked Validated Document (CPF / CNPJ) */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 rounded-lg border border-zinc-200 bg-zinc-50 p-3.5">

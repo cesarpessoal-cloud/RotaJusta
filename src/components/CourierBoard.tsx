@@ -8,6 +8,7 @@ import {
   Clock,
   ExternalLink,
   Flag,
+  Hash,
   Map as MapIcon,
   MapPin,
   Navigation,
@@ -38,6 +39,7 @@ import {
   getCourierSettlementForOrder,
   isZeroFeePropulsion,
 } from '../utils/pricing';
+import { formatPickupCode } from '../utils/pickupCode';
 import { formatPickupScheduleLabel } from '../utils/schedule';
 import {
   BIKE_RADIUS_OPTIONS,
@@ -659,6 +661,53 @@ export function CourierBoard({
                         </div>
                       </div>
 
+                      {/* Código Único de Retirada em Destaque (#RS-XXXX) */}
+                      <div className="rounded-2xl border-2 border-zinc-900 bg-amber-50 p-4 sm:p-5 space-y-3 shadow-xs">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="space-y-1">
+                            <span className="inline-flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-amber-900">
+                              <Hash className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>Código Único de Retirada</span>
+                            </span>
+                            <p className="font-mono text-2xl sm:text-3xl font-black tracking-wider text-zinc-950">
+                              {order.code}
+                            </p>
+                          </div>
+
+                          <div className="rounded-xl border border-amber-300 bg-white px-3.5 py-2 text-xs font-bold text-zinc-900">
+                            Informe este código no balcão na hora da retirada
+                          </div>
+                        </div>
+
+                        {order.type === 'rota' && order.stops.length > 0 && (
+                          <div className="border-t border-amber-200 pt-2.5 space-y-1.5">
+                            <p className="text-[11px] font-semibold text-amber-950">
+                              Códigos individuais dos pacotes desta Rota Consolidada:
+                            </p>
+                            <div className="flex flex-wrap gap-2">
+                              {order.stops.map((stop) => (
+                                <span
+                                  key={stop.id}
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-white px-2.5 py-1 text-xs text-zinc-800"
+                                >
+                                  <span className="font-semibold">
+                                    Pacote #{stop.sequence}:
+                                  </span>
+                                  <span className="font-mono font-extrabold text-zinc-950">
+                                    {stop.pickupCode || formatPickupCode(stop.id)}
+                                  </span>
+                                  {stop.expectedRecipient && (
+                                    <span className="text-zinc-500">
+                                      ({stop.expectedRecipient})
+                                    </span>
+                                  )}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
                       {/* Map + Sequential Stops List */}
                       <div className="grid grid-cols-1 gap-5 lg:grid-cols-12 items-start">
                         <div className="lg:col-span-5">
@@ -698,6 +747,11 @@ export function CourierBoard({
                                       <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 font-mono text-xs font-bold text-white">
                                         {stop.sequence}
                                       </span>
+                                      {order.type === 'rota' && (
+                                        <span className="rounded border border-amber-300 bg-amber-50 px-1.5 py-0.5 font-mono text-[11px] font-bold text-zinc-900">
+                                          {stop.pickupCode || formatPickupCode(stop.id)}
+                                        </span>
+                                      )}
                                       <span className="text-sm font-semibold text-zinc-900">
                                         {stop.address}
                                       </span>

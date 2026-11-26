@@ -481,7 +481,7 @@ const demo2StopsRaw = [
 export const INITIAL_ORDERS: Order[] = [
   {
     id: 'ord-demo-1',
-    code: 'RJ-1041',
+    code: '#RS-1041',
     type: 'rapida',
     merchantId: 'prof-lojista-1',
     merchantName: 'Café & Livraria do Centro',
@@ -495,6 +495,7 @@ export const INITIAL_ORDERS: Order[] = [
     stops: [
       {
         id: 'stop-demo-1-1',
+        pickupCode: '#RS-1041',
         sequence: 1,
         address: 'Av. Getúlio Vargas, 890',
         neighborhood: 'Menino Deus',
@@ -513,7 +514,7 @@ export const INITIAL_ORDERS: Order[] = [
   },
   {
     id: 'ord-demo-2',
-    code: 'RJ-1042',
+    code: '#RS-1042',
     type: 'rota',
     merchantId: 'prof-lojista-2',
     merchantName: 'Empório Moinhos',
@@ -531,6 +532,7 @@ export const INITIAL_ORDERS: Order[] = [
       );
       return {
         id: `stop-demo-2-${idx + 1}`,
+        pickupCode: `#RS-204${idx + 1}`,
         sequence: idx + 1,
         address: st.address,
         neighborhood: st.neighborhood,

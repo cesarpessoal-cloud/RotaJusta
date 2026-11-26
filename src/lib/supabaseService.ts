@@ -19,6 +19,8 @@ import {
   VehicleType,
 } from '../types';
 import { formatCpfOrCnpj, onlyDigits } from '../utils/documentValidation';
+import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
+import { formatPickupCode } from '../utils/pickupCode';
 import { calculatePricing } from '../utils/pricing';
 import { verifyTotpCode } from '../utils/totp';
 import { supabase } from './supabase';
@@ -32,6 +34,7 @@ interface DbProfileRow {
   name: string;
   phone?: string | null;
   email?: string | null;
+  accepts_marketing?: boolean | null;
   pix_key?: string | null;
   person_type?: string | null;
   document_number?: string | null;
@@ -76,6 +79,9 @@ interface DbDeliveryRow {
   status: string;
   payment_method?: string | null;
   payment_status?: string | null;
+  request_direction?: string | null;
+  pickup_scheduled_at?: string | null;
+  pickup_deadline_at?: string | null;
   driver_id: string | null;
   driver_name: string | null;
   source_channel: string | null;
@@ -148,8 +154,7 @@ function extractNeighborhoodFromAddress(rawAddress: string): {
 }
 
 function formatDeliveryCode(id: string): string {
-  const clean = String(id).replace(/[^a-zA-Z0-9]/g, '').toUpperCase();
-  return `RJ-${clean.slice(0, 4) || 'POA'}`;
+  return formatPickupCode(id);
 }
 
 function normalizeProfileFromRow(row: DbProfileRow): Profile {
@@ -200,6 +205,7 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
     documentNumber: docDigits || undefined,
     phone: row.phone || '',
     email: row.email || undefined,
+    acceptsMarketing: Boolean(row.accepts_marketing),
     pixKey: row.pix_key || undefined,
     neighborhood: 'Porto Alegre',
     twoFactorEnabled: Boolean(row.two_factor_enabled),
@@ -234,6 +240,7 @@ function normalizeStopFromRow(
 
   return {
     id: row.id,
+    pickupCode: formatPickupCode(row.id),
     sequence: row.stop_order,
     address: row.address,
     neighborhood: row.neighborhood || fallbackNeighborhood,
@@ -308,7 +315,11 @@ function normalizeOrderFromRows(
 
   const dirMatch = rawSource.match(/\[DIR:(enviar|receber)\]/);
   const extractedFlowDirection: OrderFlowDirection | undefined =
-    dirMatch?.[1] === 'receber'
+    row.request_direction === 'receive'
+      ? 'receber'
+      : row.request_direction === 'send'
+      ? 'enviar'
+      : dirMatch?.[1] === 'receber'
       ? 'receber'
       : dirMatch?.[1] === 'enviar'
       ? 'enviar'
@@ -316,7 +327,13 @@ function normalizeOrderFromRows(
 
   const agdMatch = rawSource.match(/\[AGD:([^|\]]*)\|([^|\]]*)\|([^\]]*)\]/);
   let extractedSchedule: PickupSchedule | undefined;
-  if (agdMatch) {
+  if (row.pickup_scheduled_at || row.pickup_deadline_at) {
+    extractedSchedule = {
+      mode: row.pickup_scheduled_at ? 'agendada' : 'imediata',
+      readyAt: row.pickup_scheduled_at || undefined,
+      deadlineAt: row.pickup_deadline_at || undefined,
+    };
+  } else if (agdMatch) {
     const mode: PickupScheduleMode =
       agdMatch[1] === 'agendada' ? 'agendada' : 'imediata';
     extractedSchedule = {
@@ -442,8 +459,58 @@ async function fetchStopsForDeliveries(
   return stopsByDelivery;
 }
 
-const SAFE_PROFILE_COLUMNS =
+const BASE_SAFE_PROFILE_COLUMNS =
   'id, name, phone, email, pix_key, person_type, document_number, company_legal_name, role, vehicle_type, propulsion, max_radius_km, cnh_ear, status, two_factor_enabled, rating_avg, rating_count, is_online, created_at';
+
+const EXTENDED_SAFE_PROFILE_COLUMNS = `${BASE_SAFE_PROFILE_COLUMNS}, accepts_marketing`;
+
+let supportsAcceptsMarketingColumn: boolean | null = null;
+
+function isMissingAcceptsMarketingError(
+  err: { code?: string; message?: string } | null
+): boolean {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  return msg.includes('accepts_marketing');
+}
+
+async function runProfileQuery<T>(
+  runner: (
+    cols: string,
+    includeMarketing: boolean
+  ) => PromiseLike<{
+    data: unknown;
+    error: { code?: string; message: string } | null;
+  }>
+): Promise<{
+  data: T | null;
+  error: { code?: string; message: string } | null;
+}> {
+  if (supportsAcceptsMarketingColumn !== false) {
+    const res = await runner(EXTENDED_SAFE_PROFILE_COLUMNS, true);
+    if (!res.error) {
+      supportsAcceptsMarketingColumn = true;
+      return res as { data: T | null; error: null };
+    }
+    if (isMissingAcceptsMarketingError(res.error)) {
+      supportsAcceptsMarketingColumn = false;
+      const fallback = await runner(BASE_SAFE_PROFILE_COLUMNS, false);
+      return fallback as {
+        data: T | null;
+        error: { code?: string; message: string } | null;
+      };
+    }
+    return res as {
+      data: T | null;
+      error: { code?: string; message: string } | null;
+    };
+  }
+  const fallback = await runner(BASE_SAFE_PROFILE_COLUMNS, false);
+  return fallback as {
+    data: T | null;
+    error: { code?: string; message: string } | null;
+  };
+}
 
 const PUBLIC_DIRECTORY_COLUMNS =
   'id, name, person_type, company_legal_name, role, vehicle_type, propulsion, max_radius_km, pix_key, status, rating_avg, rating_count, is_online, created_at';
@@ -509,34 +576,40 @@ export async function loginWithPhoneAndPin(
   }
 
   if (trimmedId.toLowerCase() === 'admin') {
-    const { data: roleMatch, error: roleError } = await supabase
-      .from('profiles')
-      .select(SAFE_PROFILE_COLUMNS)
-      .eq('role', 'admin')
-      .eq('access_pin', trimmedPin)
-      .limit(1);
+    const { data: roleMatch, error: roleError } =
+      await runProfileQuery<DbProfileRow[]>((cols) =>
+        supabase
+          .from('profiles')
+          .select(cols)
+          .eq('role', 'admin')
+          .eq('access_pin', trimmedPin)
+          .limit(1)
+      );
 
     if (roleError) {
       throw new Error(roleError.message);
     }
 
     if (roleMatch && roleMatch.length > 0) {
-      return normalizeProfileFromRow(roleMatch[0] as DbProfileRow);
+      return normalizeProfileFromRow(roleMatch[0]);
     }
 
-    const { data: phoneMatch, error: phoneError } = await supabase
-      .from('profiles')
-      .select(SAFE_PROFILE_COLUMNS)
-      .in('phone', ['admin', 'Admin'])
-      .eq('access_pin', trimmedPin)
-      .limit(1);
+    const { data: phoneMatch, error: phoneError } =
+      await runProfileQuery<DbProfileRow[]>((cols) =>
+        supabase
+          .from('profiles')
+          .select(cols)
+          .in('phone', ['admin', 'Admin'])
+          .eq('access_pin', trimmedPin)
+          .limit(1)
+      );
 
     if (phoneError) {
       throw new Error(phoneError.message);
     }
 
     if (phoneMatch && phoneMatch.length > 0) {
-      const row = phoneMatch[0] as DbProfileRow;
+      const row = phoneMatch[0];
       return normalizeProfileFromRow({ ...row, role: 'admin' });
     }
 
@@ -546,12 +619,14 @@ export async function loginWithPhoneAndPin(
   const candidatePhones = formatBrPhoneVariants(trimmedId);
   if (candidatePhones.length === 0) return null;
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .select(SAFE_PROFILE_COLUMNS)
-    .in('phone', candidatePhones)
-    .eq('access_pin', trimmedPin)
-    .limit(1);
+  const { data, error } = await runProfileQuery<DbProfileRow[]>((cols) =>
+    supabase
+      .from('profiles')
+      .select(cols)
+      .in('phone', candidatePhones)
+      .eq('access_pin', trimmedPin)
+      .limit(1)
+  );
 
   if (error) {
     throw new Error(error.message);
@@ -561,20 +636,22 @@ export async function loginWithPhoneAndPin(
     return null;
   }
 
-  return normalizeProfileFromRow(data[0] as DbProfileRow);
+  return normalizeProfileFromRow(data[0]);
 }
 
 export async function fetchAllProfiles(): Promise<Profile[]> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select(SAFE_PROFILE_COLUMNS)
-    .order('created_at', { ascending: false });
+  const { data, error } = await runProfileQuery<DbProfileRow[]>((cols) =>
+    supabase
+      .from('profiles')
+      .select(cols)
+      .order('created_at', { ascending: false })
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+  return (data || []).map(normalizeProfileFromRow);
 }
 
 /**
@@ -595,18 +672,20 @@ export async function fetchPublicProfilesDirectory(): Promise<Profile[]> {
 }
 
 export async function fetchApprovedCouriers(): Promise<Profile[]> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .select(SAFE_PROFILE_COLUMNS)
-    .eq('status', 'aprovado')
-    .in('role', ['entregador', 'motorista'])
-    .order('created_at', { ascending: false });
+  const { data, error } = await runProfileQuery<DbProfileRow[]>((cols) =>
+    supabase
+      .from('profiles')
+      .select(cols)
+      .eq('status', 'aprovado')
+      .in('role', ['entregador', 'motorista'])
+      .order('created_at', { ascending: false })
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+  return (data || []).map(normalizeProfileFromRow);
 }
 
 export async function fetchAllDeliveries(
@@ -656,10 +735,41 @@ export async function fetchWaitingDeliveries(
   );
 }
 
-/**
- * Inserts into `profiles` sending ONLY the exact allowed columns:
- * name, phone, role, vehicle_type, propulsion, max_radius_km, cnh_ear, status, access_pin
- */
+async function assertEmailIsAvailable(
+  email: string,
+  excludeProfileId?: string
+): Promise<void> {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return;
+
+  if (!isValidEmail(normalized)) {
+    throw new Error(
+      'Informe um endereço de e-mail válido (ex.: nome@dominio.com).'
+    );
+  }
+
+  let query = supabase
+    .from('profiles')
+    .select('id')
+    .ilike('email', normalized)
+    .limit(1);
+
+  if (excludeProfileId) {
+    query = query.neq('id', excludeProfileId);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  if (data && data.length > 0) {
+    throw new Error(
+      'Este e-mail já está em uso no RotaJusta. Utilize outro e-mail ou faça login.'
+    );
+  }
+}
+
 export async function insertProfileInSupabase(
   profile: Omit<Profile, 'id' | 'approvalStatus' | 'createdAt'> & {
     accessPin: string;
@@ -680,9 +790,15 @@ export async function insertProfileInSupabase(
   const resolvedPersonType: PersonType =
     profile.personType || (docDigits.length === 14 ? 'PJ' : 'PF');
 
-  const payload = {
+  const cleanEmail = normalizeEmail(profile.email || '');
+  if (cleanEmail) {
+    await assertEmailIsAvailable(cleanEmail);
+  }
+
+  const basePayload: Record<string, unknown> = {
     name: profile.name,
     phone: profile.phone,
+    email: cleanEmail || null,
     role: profile.role,
     person_type: resolvedPersonType,
     document_number: docDigits || null,
@@ -707,11 +823,21 @@ export async function insertProfileInSupabase(
         : null,
   };
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .insert(payload)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery<DbProfileRow>(
+    (cols, includeMarketing) =>
+      supabase
+        .from('profiles')
+        .insert(
+          includeMarketing
+            ? {
+                ...basePayload,
+                accepts_marketing: Boolean(profile.acceptsMarketing),
+              }
+            : basePayload
+        )
+        .select(cols)
+        .single()
+  );
 
   if (error) {
     const errLower = (error.message || '').toLowerCase();
@@ -720,12 +846,20 @@ export async function insertProfileInSupabase(
       errLower.includes('23505') ||
       errLower.includes('duplicate key')
     ) {
+      if (errLower.includes('email')) {
+        throw new Error(
+          'Este e-mail já está em uso no RotaJusta. Utilize outro e-mail ou faça login.'
+        );
+      }
+      if (errLower.includes('phone')) {
+        throw new Error('Este telefone já está cadastrado no RotaJusta.');
+      }
       throw new Error('Este CPF/CNPJ já está cadastrado no RotaJusta.');
     }
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function updatePixKeyInSupabase(
@@ -733,18 +867,20 @@ export async function updatePixKeyInSupabase(
   pixKey: string
 ): Promise<Profile> {
   const cleanKey = pixKey.trim();
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({ pix_key: cleanKey || null })
-    .eq('id', profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({ pix_key: cleanKey || null })
+      .eq('id', profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function fetchPlatformPixKey(): Promise<string | null> {
@@ -766,18 +902,20 @@ export async function updateProfileStatusInSupabase(
   profileId: string,
   approvalStatus: ApprovalStatus
 ): Promise<Profile> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({ status: mapApprovalToDbStatus(approvalStatus) })
-    .eq('id', profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({ status: mapApprovalToDbStatus(approvalStatus) })
+      .eq('id', profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export interface AdminProfileUpdateInput {
@@ -785,6 +923,7 @@ export interface AdminProfileUpdateInput {
   name: string;
   phone: string;
   email?: string;
+  acceptsMarketing?: boolean;
   role: UserRole;
   personType: PersonType;
   documentNumber?: string;
@@ -807,6 +946,11 @@ export async function adminUpdateProfileInSupabase(
     throw new Error('Nome e telefone/usuário de acesso são obrigatórios.');
   }
 
+  const cleanEmail = normalizeEmail(input.email || '');
+  if (cleanEmail) {
+    await assertEmailIsAvailable(cleanEmail, input.profileId);
+  }
+
   const cleanPin = (input.accessPin || '').trim();
   if (cleanPin && !/^\d{4}$/.test(cleanPin)) {
     throw new Error('O PIN de acesso deve conter exatamente 4 dígitos numéricos.');
@@ -816,10 +960,10 @@ export async function adminUpdateProfileInSupabase(
     input.role === 'entregador' || input.role === 'motorista';
   const docDigits = onlyDigits(input.documentNumber || '');
 
-  const payload: Record<string, unknown> = {
+  const basePayload: Record<string, unknown> = {
     name: cleanName,
     phone: cleanPhone,
-    email: input.email?.trim() || null,
+    email: cleanEmail || null,
     role: input.role,
     person_type: input.personType,
     document_number: docDigits || null,
@@ -841,15 +985,21 @@ export async function adminUpdateProfileInSupabase(
   };
 
   if (cleanPin) {
-    payload.access_pin = cleanPin;
+    basePayload.access_pin = cleanPin;
   }
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .update(payload)
-    .eq('id', input.profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols, includeMarketing) =>
+    supabase
+      .from('profiles')
+      .update(
+        includeMarketing && input.acceptsMarketing !== undefined
+          ? { ...basePayload, accepts_marketing: Boolean(input.acceptsMarketing) }
+          : basePayload
+      )
+      .eq('id', input.profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     const errLower = (error.message || '').toLowerCase();
@@ -858,6 +1008,11 @@ export async function adminUpdateProfileInSupabase(
       errLower.includes('23505') ||
       errLower.includes('duplicate key')
     ) {
+      if (errLower.includes('email')) {
+        throw new Error(
+          'Este e-mail já está em uso por outro usuário no RotaJusta.'
+        );
+      }
       throw new Error(
         'Este CPF/CNPJ ou telefone já pertence a outro usuário cadastrado.'
       );
@@ -865,7 +1020,7 @@ export async function adminUpdateProfileInSupabase(
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function adminDeleteProfileInSupabase(params: {
@@ -1024,36 +1179,40 @@ export async function updateBikeMaxRadiusInSupabase(
   courierId: string,
   radiusKm: number | null
 ): Promise<Profile> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({ max_radius_km: radiusKm })
-    .eq('id', courierId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({ max_radius_km: radiusKm })
+      .eq('id', courierId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function updateCourierOnlineStatusInSupabase(
   profileId: string,
   isOnline: boolean
 ): Promise<Profile> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({ is_online: isOnline })
-    .eq('id', profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({ is_online: isOnline })
+      .eq('id', profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function fetchDeliveryByIdWithStops(
@@ -1161,22 +1320,36 @@ export async function updateBasicAccountInfoInSupabase(params: {
   profileId: string;
   name: string;
   email: string;
+  acceptsMarketing?: boolean;
 }): Promise<Profile> {
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({
-      name: params.name.trim(),
-      email: params.email.trim() || null,
-    })
-    .eq('id', params.profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const cleanEmail = normalizeEmail(params.email || '');
+  if (cleanEmail) {
+    await assertEmailIsAvailable(cleanEmail, params.profileId);
+  }
+
+  const basePayload = {
+    name: params.name.trim(),
+    email: cleanEmail || null,
+  };
+
+  const { data, error } = await runProfileQuery((cols, includeMarketing) =>
+    supabase
+      .from('profiles')
+      .update(
+        includeMarketing && params.acceptsMarketing !== undefined
+          ? { ...basePayload, accepts_marketing: Boolean(params.acceptsMarketing) }
+          : basePayload
+      )
+      .eq('id', params.profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function updateLoginIdentifierInSupabase(params: {
@@ -1191,18 +1364,20 @@ export async function updateLoginIdentifierInSupabase(params: {
     params.totpCode
   );
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({ phone: params.newPhone.trim() })
-    .eq('id', params.profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({ phone: params.newPhone.trim() })
+      .eq('id', params.profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function updateAccessPinInSupabase(params: {
@@ -1244,21 +1419,23 @@ export async function enableTwoFactorInSupabase(params: {
     );
   }
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({
-      two_factor_enabled: true,
-      two_factor_secret: params.secret,
-    })
-    .eq('id', params.profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({
+        two_factor_enabled: true,
+        two_factor_secret: params.secret,
+      })
+      .eq('id', params.profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 export async function disableTwoFactorInSupabase(params: {
@@ -1272,21 +1449,23 @@ export async function disableTwoFactorInSupabase(params: {
     params.totpCode
   );
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .update({
-      two_factor_enabled: false,
-      two_factor_secret: null,
-    })
-    .eq('id', params.profileId)
-    .select(SAFE_PROFILE_COLUMNS)
-    .single();
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update({
+        two_factor_enabled: false,
+        two_factor_secret: null,
+      })
+      .eq('id', params.profileId)
+      .select(cols)
+      .single()
+  );
 
   if (error) {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as DbProfileRow);
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
 }
 
 /**
@@ -1311,16 +1490,23 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
   }
   if (order.flowDirection === 'receber') {
     sourceTags.push('[DIR:receber]');
+  } else if (order.flowDirection === 'enviar') {
+    sourceTags.push('[DIR:enviar]');
   }
-  if (order.pickupSchedule && order.pickupSchedule.mode === 'agendada') {
+  if (
+    order.pickupSchedule &&
+    (order.pickupSchedule.mode === 'agendada' ||
+      order.pickupSchedule.deadlineAt)
+  ) {
+    const modeTag = order.pickupSchedule.mode;
     const ready = order.pickupSchedule.readyAt || '';
     const deadline = order.pickupSchedule.deadlineAt || '';
-    sourceTags.push(`[AGD:agendada|${ready}|${deadline}]`);
+    sourceTags.push(`[AGD:${modeTag}|${ready}|${deadline}]`);
   }
   const sourceChannelWithTags =
     sourceTags.length > 0 ? `${baseName} ${sourceTags.join(' ')}` : baseName;
 
-  const basePayload = {
+  const basePayload: Record<string, unknown> = {
     type: order.type,
     pickup_address: pickupWithNeighborhood,
     delivery_region: order.destinationNeighborhood,
@@ -1340,34 +1526,61 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     source_channel: sourceChannelWithTags,
   };
 
+  const extendedPayload: Record<string, unknown> = {
+    ...basePayload,
+    payment_method: chosenMethod,
+    request_direction: order.flowDirection === 'receber' ? 'receive' : 'send',
+    pickup_scheduled_at: order.pickupSchedule?.readyAt
+      ? new Date(order.pickupSchedule.readyAt).toISOString()
+      : null,
+    pickup_deadline_at: order.pickupSchedule?.deadlineAt
+      ? new Date(order.pickupSchedule.deadlineAt).toISOString()
+      : null,
+  };
+
   let { data: insertedDelivery, error: deliveryError } = await supabase
     .from('deliveries')
-    .insert({
-      ...basePayload,
-      payment_method: chosenMethod,
-    })
+    .insert(extendedPayload)
     .select('*')
     .single();
 
   if (
     deliveryError &&
-    (deliveryError.message.includes('payment_method') ||
-      deliveryError.code === 'PGRST204')
+    (deliveryError.code === 'PGRST204' ||
+      deliveryError.code === '42703' ||
+      deliveryError.message.includes('payment_method') ||
+      deliveryError.message.includes('request_direction') ||
+      deliveryError.message.includes('pickup_scheduled_at') ||
+      deliveryError.message.includes('pickup_deadline_at'))
   ) {
     const fallbackSource =
       chosenMethod === 'pix_plataforma'
-        ? `${basePayload.source_channel} [PIX:plataforma]`
-        : basePayload.source_channel;
-    const retry = await supabase
+        ? `${sourceChannelWithTags} [PIX:plataforma]`
+        : sourceChannelWithTags;
+    const retryWithPaymentMethod = await supabase
       .from('deliveries')
       .insert({
         ...basePayload,
-        source_channel: fallbackSource,
+        payment_method: chosenMethod,
       })
       .select('*')
       .single();
-    insertedDelivery = retry.data;
-    deliveryError = retry.error;
+
+    if (!retryWithPaymentMethod.error) {
+      insertedDelivery = retryWithPaymentMethod.data;
+      deliveryError = null;
+    } else {
+      const retryBase = await supabase
+        .from('deliveries')
+        .insert({
+          ...basePayload,
+          source_channel: fallbackSource,
+        })
+        .select('*')
+        .single();
+      insertedDelivery = retryBase.data;
+      deliveryError = retryBase.error;
+    }
   }
 
   if (deliveryError) {
@@ -1631,7 +1844,7 @@ export async function seedInitialSupabaseData(): Promise<{
 
   const order1 = await createDeliveryInSupabase({
     id: '',
-    code: 'RJ-1041',
+    code: '#RS-1041',
     type: 'rapida',
     merchantId: '',
     merchantName: 'Café & Livraria do Centro',
@@ -1679,7 +1892,7 @@ export async function seedInitialSupabaseData(): Promise<{
 
   const order2 = await createDeliveryInSupabase({
     id: '',
-    code: 'RJ-1042',
+    code: '#RS-1042',
     type: 'frete',
     merchantId: '',
     merchantName: 'Empório Moinhos',

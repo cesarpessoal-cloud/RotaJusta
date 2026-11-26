@@ -13,6 +13,7 @@ import { AuthScreen, AuthTab, RegProfileChoice } from './components/AuthScreen';
 import { CourierBoard } from './components/CourierBoard';
 import { AdminSupervisionView, Header } from './components/Header';
 import { LandingPage } from './components/LandingPage';
+import { LegalDocTab, LegalModal } from './components/LegalModal';
 import { MerchantPanel } from './components/MerchantPanel';
 import { MyAccountModal } from './components/MyAccountModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
@@ -80,6 +81,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [isSeeding, setIsSeeding] = useState<boolean>(false);
   const [isAccountModalOpen, setIsAccountModalOpen] = useState<boolean>(false);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocTab | null>(null);
   const [dbError, setDbError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [newOfferBanner, setNewOfferBanner] = useState<Order | null>(null);
@@ -1416,12 +1418,36 @@ export default function App() {
             <strong className="font-semibold text-zinc-800">RotaJusta</strong> ·
             Entregas urbanas e mobilidade justa em Porto Alegre (RS)
           </p>
-          <p>
-            Taxa fixa transparente · 100% da taxa revertida como bônus para veículos
-            elétricos e bikes
-          </p>
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('termos')}
+              className="font-semibold text-zinc-600 hover:text-emerald-700"
+            >
+              Termos de Uso
+            </button>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('privacidade')}
+              className="font-semibold text-zinc-600 hover:text-emerald-700"
+            >
+              Política de Privacidade
+            </button>
+            <span className="hidden sm:inline text-zinc-400">·</span>
+            <span>
+              Taxa fixa transparente · 100% da taxa revertida como bônus para veículos
+              elétricos e bikes
+            </span>
+          </div>
         </div>
       </footer>
+
+      {legalModalTab && (
+        <LegalModal
+          initialTab={legalModalTab}
+          onClose={() => setLegalModalTab(null)}
+        />
+      )}
 
       {isAccountModalOpen && (
         <MyAccountModal

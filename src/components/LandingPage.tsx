@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import heroPoaImage from '../assets/images/rotajusta_hero_poa_1795704483725.jpg';
 import { RegProfileChoice } from './AuthScreen';
+import { LegalDocTab, LegalModal } from './LegalModal';
 import { PWAInstallButton } from './PWAInstallButton';
 
 interface LandingPageProps {
@@ -45,6 +46,7 @@ export function LandingPage({
   onSeedTestData,
 }: LandingPageProps) {
   const [heroImgFailed, setHeroImgFailed] = useState(false);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocTab | null>(null);
 
   const onlineText = isLoadingOnlineCount
     ? 'Verificando entregadores online em Porto Alegre...'
@@ -668,7 +670,21 @@ export function LandingPage({
             <span>·</span>
             <span>Entregas urbanas e mobilidade justa em Porto Alegre (RS)</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('termos')}
+              className="font-semibold text-zinc-600 hover:text-emerald-700"
+            >
+              Termos de Uso
+            </button>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('privacidade')}
+              className="font-semibold text-zinc-600 hover:text-emerald-700"
+            >
+              Política de Privacidade
+            </button>
             <button
               type="button"
               onClick={scrollToHistory}
@@ -693,6 +709,13 @@ export function LandingPage({
           </div>
         </div>
       </footer>
+
+      {legalModalTab && (
+        <LegalModal
+          initialTab={legalModalTab}
+          onClose={() => setLegalModalTab(null)}
+        />
+      )}
     </div>
   );
 }

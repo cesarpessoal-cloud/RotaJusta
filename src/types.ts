@@ -58,6 +58,7 @@ export interface Profile {
   documentNumber?: string; // Somente dígitos numéricos
   phone: string;
   email?: string;
+  acceptsMarketing?: boolean;
   pixKey?: string;
   neighborhood: string;
   address?: string;
@@ -89,6 +90,7 @@ export interface Rating {
 
 export interface DeliveryStop {
   id: string;
+  pickupCode?: string;
   sequence: number;
   address: string;
   neighborhood: string;

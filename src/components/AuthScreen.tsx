@@ -10,6 +10,7 @@ import {
   KeyRound,
   Loader2,
   LogIn,
+  Mail,
   Phone,
   RefreshCw,
   Route,
@@ -20,6 +21,7 @@ import {
   UserPlus,
   Zap,
 } from 'lucide-react';
+import { LegalDocTab, LegalModal } from './LegalModal';
 import { PWAInstallButton } from './PWAInstallButton';
 import {
   insertProfileInSupabase,
@@ -41,6 +43,7 @@ import {
   lookupCnpjBrasilApi,
   onlyDigits,
 } from '../utils/documentValidation';
+import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
 import { getPixKeyPlaceholder, PIX_KEY_TYPES } from '../utils/pix';
 import { isZeroFeePropulsion } from '../utils/pricing';
 import {
@@ -111,6 +114,7 @@ export function AuthScreen({
   const lastLookedUpCnpjRef = useRef<string>('');
 
   const [regName, setRegName] = useState('');
+  const [regEmail, setRegEmail] = useState('');
   const [regPhone, setRegPhone] = useState('');
   const [regPin, setRegPin] = useState('');
   const [vehicleType, setVehicleType] = useState<VehicleType>('Moto');
@@ -119,6 +123,9 @@ export function AuthScreen({
   const [hasEar, setHasEar] = useState<boolean>(false);
   const [pixKeyType, setPixKeyType] = useState<PixKeyType>('Telefone');
   const [pixKey, setPixKey] = useState<string>('');
+  const [acceptedTerms, setAcceptedTerms] = useState<boolean>(false);
+  const [acceptsMarketing, setAcceptsMarketing] = useState<boolean>(false);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocTab | null>(null);
   const [isRegistering, setIsRegistering] = useState(false);
   const [regError, setRegError] = useState('');
 
@@ -373,6 +380,21 @@ export function AuthScreen({
     setPendingProfile(null);
     setBlockedProfile(null);
 
+    if (!acceptedTerms) {
+      setRegError(
+        'Para concluir o cadastro, leia e concorde com os Termos de Uso e a Política de Privacidade do RotaJusta.'
+      );
+      return;
+    }
+
+    const cleanEmail = normalizeEmail(regEmail);
+    if (!cleanEmail || !isValidEmail(cleanEmail)) {
+      setRegError(
+        'Informe um e-mail válido (ex.: nome@dominio.com) para concluir o cadastro.'
+      );
+      return;
+    }
+
     const docDigits = onlyDigits(regDocument);
 
     if (regPersonType === 'PJ') {
@@ -423,6 +445,8 @@ export function AuthScreen({
           personType: 'PJ',
           name: finalDisplayName,
           companyLegalName: verifiedLegalName || finalDisplayName,
+          email: cleanEmail,
+          acceptsMarketing,
           phone: regPhone.trim(),
           document: regDocument,
           documentNumber: docDigits,
@@ -468,6 +492,8 @@ export function AuthScreen({
         role: regRole,
         personType: 'PF',
         name: regName.trim(),
+        email: cleanEmail,
+        acceptsMarketing,
         phone: regPhone.trim(),
         document: regDocument,
         documentNumber: docDigits,
@@ -1058,6 +1084,42 @@ export function AuthScreen({
                 />
               </div>
 
+              <div>
+                <label
+                  htmlFor="reg-auth-email"
+                  className="block text-xs font-semibold text-zinc-700 mb-1.5"
+                >
+                  E-mail <span className="text-red-600">*</span>
+                </label>
+                <div className="relative">
+                  <Mail
+                    className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    id="reg-auth-email"
+                    type="email"
+                    required
+                    value={regEmail}
+                    onChange={(e) => {
+                      setRegEmail(e.target.value);
+                      if (regError) setRegError('');
+                    }}
+                    placeholder="nome@dominio.com"
+                    className={`w-full rounded-lg border bg-white pl-9 pr-3 py-2 text-sm text-zinc-900 placeholder:text-zinc-400 focus:outline-none ${
+                      regEmail.trim().length > 0 && !isValidEmail(regEmail)
+                        ? 'border-red-300 focus:border-red-500'
+                        : 'border-zinc-300 focus:border-emerald-600'
+                    }`}
+                  />
+                </div>
+                {regEmail.trim().length > 0 && !isValidEmail(regEmail) && (
+                  <p className="mt-1 text-[11px] font-medium text-red-600">
+                    Formato de e-mail inválido. Use um endereço como nome@dominio.com.
+                  </p>
+                )}
+              </div>
+
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label
@@ -1303,6 +1365,61 @@ export function AuthScreen({
                 </div>
               )}
 
+              <div className="space-y-2.5">
+                <label className="flex items-start gap-2.5 rounded-xl border border-zinc-200 bg-zinc-50/80 px-3.5 py-3 cursor-pointer text-xs text-zinc-700 leading-relaxed">
+                  <input
+                    type="checkbox"
+                    checked={acceptedTerms}
+                    onChange={(e) => {
+                      setAcceptedTerms(e.target.checked);
+                      if (e.target.checked) setRegError('');
+                    }}
+                    className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600 shrink-0"
+                  />
+                  <span>
+                    Li e concordo com os{' '}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setLegalModalTab('termos');
+                      }}
+                      className="font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-900"
+                    >
+                      Termos de Uso
+                    </button>{' '}
+                    e a{' '}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        setLegalModalTab('privacidade');
+                      }}
+                      className="font-semibold text-emerald-700 underline underline-offset-2 hover:text-emerald-900"
+                    >
+                      Política de Privacidade
+                    </button>{' '}
+                    do RotaJusta <span className="text-red-600 font-semibold">*</span>
+                  </span>
+                </label>
+
+                <label className="flex items-start gap-2.5 rounded-xl border border-zinc-200 bg-white px-3.5 py-2.5 cursor-pointer text-xs text-zinc-600 leading-relaxed hover:bg-zinc-50/60 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={acceptsMarketing}
+                    onChange={(e) => setAcceptsMarketing(e.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-emerald-600 focus:ring-emerald-600 shrink-0"
+                  />
+                  <span>
+                    Aceito receber novidades, dicas operacionais e atualizações do
+                    RotaJusta por e-mail{' '}
+                    <span className="text-zinc-400">(opcional)</span>
+                  </span>
+                </label>
+              </div>
+
               {regError && (
                 <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
                   {regError}
@@ -1351,9 +1468,44 @@ export function AuthScreen({
         )}
       </div>
 
-      <footer className="text-center text-xs text-zinc-500 pt-6">
-        RotaJusta · Mobilidade limpa e taxa fixa justa em Porto Alegre (RS)
+      <footer className="text-center text-xs text-zinc-500 pt-6 space-y-1.5">
+        <p>
+          RotaJusta · Mobilidade limpa e taxa fixa justa em Porto Alegre (RS)
+        </p>
+        <div className="flex items-center justify-center gap-3">
+          <button
+            type="button"
+            onClick={() => setLegalModalTab('termos')}
+            className="font-semibold text-zinc-600 hover:text-emerald-700"
+          >
+            Termos de Uso
+          </button>
+          <span aria-hidden="true">·</span>
+          <button
+            type="button"
+            onClick={() => setLegalModalTab('privacidade')}
+            className="font-semibold text-zinc-600 hover:text-emerald-700"
+          >
+            Política de Privacidade
+          </button>
+        </div>
       </footer>
+
+      {legalModalTab && (
+        <LegalModal
+          initialTab={legalModalTab}
+          onClose={() => setLegalModalTab(null)}
+          onAccept={
+            authTab === 'cadastrar'
+              ? () => {
+                  setAcceptedTerms(true);
+                  setRegError('');
+                  setLegalModalTab(null);
+                }
+              : undefined
+          }
+        />
+      )}
     </div>
   );
 }
