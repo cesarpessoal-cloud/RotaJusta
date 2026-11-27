@@ -122,6 +122,44 @@ export async function playDoubleAscendingChime(): Promise<void> {
   }
 }
 
+/**
+ * Aviso sonoro discreto e suave (sineta curta via Web Audio API)
+ * para notificar o lojista e o destinatário quando o entregador
+ * clica em "Estou chegando" ou "Cheguei".
+ */
+export async function playDiscreteQuickNoticeChime(): Promise<void> {
+  try {
+    const ctx = getOrCreateAudioContext();
+    if (!ctx) return;
+    if (ctx.state === 'suspended') {
+      await ctx.resume();
+    }
+
+    const now = ctx.currentTime;
+    const playSoftBell = (freq: number, offset: number, duration: number) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(freq, now + offset);
+
+      gain.gain.setValueAtTime(0.0001, now + offset);
+      gain.gain.exponentialRampToValueAtTime(0.1, now + offset + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + duration);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(now + offset);
+      osc.stop(now + offset + duration + 0.02);
+    };
+
+    playSoftBell(659.25, 0, 0.14); // E5
+    playSoftBell(987.77, 0.14, 0.22); // B5
+  } catch {
+    // Ignorar se o navegador bloquear áudio automático antes de interação
+  }
+}
+
 export function speakRotaJustaOffer(
   spokenText = 'RotaJusta! Nova oferta de entrega disponível.'
 ): void {

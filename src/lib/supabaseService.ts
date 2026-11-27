@@ -442,20 +442,63 @@ function normalizeOrderFromRows(
   const avisoMatch = rawSource.match(
     /\[AVISO:([^|\]]+)\|([^|\]]*)(?:\|([^\]]*))?\]/
   );
+  const parsedAvisoStopSeq = avisoMatch?.[3]
+    ? Number(avisoMatch[3])
+    : undefined;
+  const safeAvisoStopSeq =
+    parsedAvisoStopSeq && !Number.isNaN(parsedAvisoStopSeq)
+      ? parsedAvisoStopSeq
+      : undefined;
+
+  const historyEvents: CourierQuickNotice[] = [];
+  const evtRegex = /\[EVT:([^|\]]+)\|([^|\]]*)(?:\|([^\]]*))?\]/g;
+  let evtMatch: RegExpExecArray | null;
+  while ((evtMatch = evtRegex.exec(rawSource)) !== null) {
+    const evtType = evtMatch[1];
+    const evtAt = evtMatch[2] || row.created_at || new Date().toISOString();
+    const evtSeqRaw = evtMatch[3] ? Number(evtMatch[3]) : undefined;
+    const evtSeq =
+      evtSeqRaw && !Number.isNaN(evtSeqRaw) ? evtSeqRaw : undefined;
+    if (isCourierQuickNoticeType(evtType)) {
+      historyEvents.push(buildCourierQuickNotice(evtType, evtAt, evtSeq));
+    }
+  }
+
   let extractedQuickNotice: CourierQuickNotice | undefined;
   if (isCourierQuickNoticeType(row.courier_notice)) {
     extractedQuickNotice = buildCourierQuickNotice(
       row.courier_notice,
-      row.courier_notice_at || row.created_at || new Date().toISOString()
+      row.courier_notice_at ||
+        avisoMatch?.[2] ||
+        row.created_at ||
+        new Date().toISOString(),
+      safeAvisoStopSeq
     );
   } else if (avisoMatch && isCourierQuickNoticeType(avisoMatch[1])) {
-    const parsedStopSeq = avisoMatch[3] ? Number(avisoMatch[3]) : undefined;
     extractedQuickNotice = buildCourierQuickNotice(
       avisoMatch[1],
       avisoMatch[2] || row.created_at || new Date().toISOString(),
-      parsedStopSeq && !Number.isNaN(parsedStopSeq) ? parsedStopSeq : undefined
+      safeAvisoStopSeq
     );
+  } else if (historyEvents.length > 0) {
+    extractedQuickNotice = historyEvents[historyEvents.length - 1];
   }
+
+  if (
+    extractedQuickNotice &&
+    !historyEvents.some(
+      (e) =>
+        e.type === extractedQuickNotice!.type &&
+        e.updatedAt === extractedQuickNotice!.updatedAt
+    )
+  ) {
+    historyEvents.push(extractedQuickNotice);
+  }
+
+  historyEvents.sort(
+    (a, b) =>
+      new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
+  );
 
   const cleanMerchantName =
     rawSource
@@ -465,6 +508,7 @@ function normalizeOrderFromRows(
       .replace(/\s*\[VEH:(?:bike|moto|carro|utilitario)\]/gi, '')
       .replace(/\s*\[AGD:[^\]]*\]/g, '')
       .replace(/\s*\[AVISO:[^\]]*\]/g, '')
+      .replace(/\s*\[EVT:[^\]]*\]/g, '')
       .trim() || 'Lojista Porto Alegre';
 
   let merchantProfile = extractedMerchantId
@@ -555,6 +599,8 @@ function normalizeOrderFromRows(
     netCourierPayout: orderStatus !== 'Aguardando' ? driverPayout : undefined,
     courierQuickNotice:
       orderStatus === 'Em Rota' ? extractedQuickNotice : undefined,
+    courierNoticeHistory:
+      historyEvents.length > 0 ? historyEvents : undefined,
     createdAt: row.created_at || new Date().toISOString(),
   };
 }
@@ -1556,6 +1602,60 @@ export async function fetchDeliveryByIdWithStops(
   );
 }
 
+export async function fetchPublicOrderTrackingByCode(
+  codeOrId: string
+): Promise<Order | null> {
+  const raw = String(codeOrId || '').trim();
+  if (!raw) return null;
+
+  const directory = await fetchPublicProfilesDirectory().catch(() => [] as Profile[]);
+  const profileMap = new Map(directory.map((p) => [p.id, p] as const));
+
+  const uuidRegex =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (uuidRegex.test(raw)) {
+    return fetchDeliveryByIdWithStops(raw, directory);
+  }
+
+  const normalizedSuffix = raw
+    .toUpperCase()
+    .replace(/^#/, '')
+    .replace(/^RS-?/, '')
+    .replace(/[^A-Z0-9]/g, '');
+  if (!normalizedSuffix) return null;
+
+  const targetCode = `#RS-${normalizedSuffix.slice(0, 4).padEnd(4, '0')}`;
+
+  const { data, error } = await supabase
+    .from('deliveries')
+    .select('*')
+    .order('created_at', { ascending: false })
+    .limit(250);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const rows = (data || []) as DbDeliveryRow[];
+  const matched =
+    rows.find((r) => formatDeliveryCode(r.id) === targetCode) ||
+    rows.find((r) =>
+      r.id
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toUpperCase()
+        .startsWith(normalizedSuffix)
+    );
+
+  if (!matched) return null;
+
+  const stopsMap = await fetchStopsForDeliveries([matched.id]);
+  return normalizeOrderFromRows(
+    matched,
+    stopsMap.get(matched.id) || [],
+    profileMap
+  );
+}
+
 export async function verifyLoginTwoFactor(
   profileId: string,
   totpCode: string
@@ -2034,11 +2134,42 @@ export async function updateDeliveryQuickNoticeInSupabase(params: {
   const { orderId, noticeType, stopSequence, profilesList } = params;
   const nowIso = new Date().toISOString();
 
+  const { data: currentRow } = await supabase
+    .from('deliveries')
+    .select('source_channel')
+    .eq('id', orderId)
+    .maybeSingle();
+
+  const rawExistingSource = String(
+    (currentRow as { source_channel?: string | null } | null)
+      ?.source_channel || 'Lojista Porto Alegre'
+  );
+
+  const existingEvents = rawExistingSource.match(/\[EVT:[^\]]*\]/g) || [];
+  const nextEvtTag = stopSequence
+    ? `[EVT:${noticeType}|${nowIso}|${stopSequence}]`
+    : `[EVT:${noticeType}|${nowIso}]`;
+  const trimmedHistory = [...existingEvents, nextEvtTag].slice(-8).join(' ');
+
+  const baseSource = rawExistingSource
+    .replace(/\s*\[AVISO:[^\]]*\]/g, '')
+    .replace(/\s*\[EVT:[^\]]*\]/g, '')
+    .trim();
+
+  const noticeTag = stopSequence
+    ? `[AVISO:${noticeType}|${nowIso}|${stopSequence}]`
+    : `[AVISO:${noticeType}|${nowIso}]`;
+
+  const nextSourceChannel = `${baseSource} ${noticeTag} ${trimmedHistory}`
+    .replace(/\s+/g, ' ')
+    .trim();
+
   let { data: updatedRow, error } = await supabase
     .from('deliveries')
     .update({
       courier_notice: noticeType,
       courier_notice_at: nowIso,
+      source_channel: nextSourceChannel,
     })
     .eq('id', orderId)
     .select('*')
@@ -2050,31 +2181,10 @@ export async function updateDeliveryQuickNoticeInSupabase(params: {
       error.code === '42703' ||
       error.message.includes('courier_notice'))
   ) {
-    const { data: currentRow, error: readErr } = await supabase
-      .from('deliveries')
-      .select('source_channel')
-      .eq('id', orderId)
-      .single();
-
-    if (readErr) {
-      throw new Error(readErr.message);
-    }
-
-    const baseSource = String(
-      (currentRow as { source_channel?: string | null } | null)
-        ?.source_channel || 'Lojista Porto Alegre'
-    )
-      .replace(/\s*\[AVISO:[^\]]*\]/g, '')
-      .trim();
-
-    const noticeTag = stopSequence
-      ? `[AVISO:${noticeType}|${nowIso}|${stopSequence}]`
-      : `[AVISO:${noticeType}|${nowIso}]`;
-
     const retryRes = await supabase
       .from('deliveries')
       .update({
-        source_channel: `${baseSource} ${noticeTag}`.trim(),
+        source_channel: nextSourceChannel,
       })
       .eq('id', orderId)
       .select('*')
@@ -2099,12 +2209,19 @@ export async function updateDeliveryQuickNoticeInSupabase(params: {
     profileMap
   );
 
-  // Ensure notice is attached even if DB schema didn't return courier_notice
+  const fallbackNotice = buildCourierQuickNotice(
+    noticeType,
+    nowIso,
+    stopSequence
+  );
   return {
     ...normalized,
-    courierQuickNotice:
-      normalized.courierQuickNotice ||
-      buildCourierQuickNotice(noticeType, nowIso, stopSequence),
+    courierQuickNotice: normalized.courierQuickNotice || fallbackNotice,
+    courierNoticeHistory:
+      normalized.courierNoticeHistory &&
+      normalized.courierNoticeHistory.length > 0
+        ? normalized.courierNoticeHistory
+        : [fallbackNotice],
   };
 }
 
@@ -2143,35 +2260,6 @@ export async function confirmDeliveryStopInSupabase(params: {
       : s
   );
 
-  const allDelivered =
-    updatedStops.length > 0 && updatedStops.every((s) => s.delivered);
-
-  if (allDelivered) {
-    const { data: updatedDelivery, error: deliveryError } = await supabase
-      .from('deliveries')
-      .update({ status: 'entregue' as DbDeliveryStatus })
-      .eq('id', order.id)
-      .select('*')
-      .single();
-
-    if (deliveryError) {
-      throw new Error(deliveryError.message);
-    }
-
-    const stopsMap = await fetchStopsForDeliveries([
-      (updatedDelivery as DbDeliveryRow).id,
-    ]);
-    const profileMap = courier ? new Map([[courier.id, courier]]) : new Map();
-    return {
-      updatedOrder: normalizeOrderFromRows(
-        updatedDelivery as DbDeliveryRow,
-        stopsMap.get((updatedDelivery as DbDeliveryRow).id) || [],
-        profileMap
-      ),
-      autoCompleted: true,
-    };
-  }
-
   return {
     updatedOrder: {
       ...order,
@@ -2183,11 +2271,15 @@ export async function confirmDeliveryStopInSupabase(params: {
 
 export async function completeDeliveryInSupabase(
   orderId: string,
-  courier?: Profile
+  courier?: Profile,
+  profilesList?: Profile[]
 ): Promise<Order> {
   const { data: updatedDelivery, error } = await supabase
     .from('deliveries')
-    .update({ status: 'entregue' as DbDeliveryStatus })
+    .update({
+      status: 'entregue' as DbDeliveryStatus,
+      payment_status: 'repassado' as PaymentStatus,
+    })
     .eq('id', orderId)
     .select('*')
     .single();
@@ -2199,7 +2291,13 @@ export async function completeDeliveryInSupabase(
   const stopsMap = await fetchStopsForDeliveries([
     (updatedDelivery as DbDeliveryRow).id,
   ]);
-  const profileMap = courier ? new Map([[courier.id, courier]]) : new Map();
+  const profileMap = new Map<string, Profile>();
+  for (const p of profilesList || []) {
+    profileMap.set(p.id, p);
+  }
+  if (courier) {
+    profileMap.set(courier.id, courier);
+  }
   return normalizeOrderFromRows(
     updatedDelivery as DbDeliveryRow,
     stopsMap.get((updatedDelivery as DbDeliveryRow).id) || [],

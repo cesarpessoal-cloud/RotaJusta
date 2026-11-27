@@ -24,6 +24,7 @@ import {
   UserCheck,
   Volume2,
   Wallet,
+  X,
   Zap,
 } from 'lucide-react';
 import {
@@ -64,6 +65,7 @@ import {
 import { formatPickupCode } from '../utils/pickupCode';
 import {
   buildQuickNoticeWhatsAppMessage,
+  buildTrackingUrl,
   buildWhatsAppUrl,
   extractBrPhoneDigits,
   QUICK_NOTICE_META,
@@ -101,6 +103,7 @@ interface CourierBoardProps {
   orders: Order[];
   ratings: Rating[];
   activeCourierId: string;
+  platformPixKey?: string | null;
   onSelectCourier: (id: string) => void;
   onAcceptOrder: (orderId: string, courier: Profile) => Promise<void>;
   onSendQuickNotice?: (
@@ -138,6 +141,7 @@ export function CourierBoard({
   orders,
   ratings,
   activeCourierId,
+  platformPixKey = null,
   onSelectCourier,
   onAcceptOrder,
   onSendQuickNotice,
@@ -193,6 +197,17 @@ export function CourierBoard({
   const [openPixQrOrderIds, setOpenPixQrOrderIds] = useState<
     Record<string, boolean>
   >({});
+  const [settlementModalOrderId, setSettlementModalOrderId] = useState<
+    string | null
+  >(null);
+  const [isCompletingSettlement, setIsCompletingSettlement] = useState(false);
+  const [modalPixTypeDraft, setModalPixTypeDraft] = useState<PixKeyType>(() =>
+    inferPixKeyType(activeCourier?.pixKey)
+  );
+  const [modalPixKeyDraft, setModalPixKeyDraft] = useState<string>(
+    activeCourier?.pixKey || ''
+  );
+  const [isSavingModalPix, setIsSavingModalPix] = useState(false);
 
   // Identidade Visual & Veículo (Tab 3)
   const [avatarDraft, setAvatarDraft] = useState<string>(
@@ -221,8 +236,21 @@ export function CourierBoard({
   useEffect(() => {
     setPixTypeDraft(inferPixKeyType(activeCourier?.pixKey));
     setPixKeyDraft(activeCourier?.pixKey || '');
+    setModalPixTypeDraft(inferPixKeyType(activeCourier?.pixKey));
+    setModalPixKeyDraft(activeCourier?.pixKey || '');
     setPixFeedback(null);
   }, [activeCourier?.id, activeCourier?.pixKey]);
+
+  useEffect(() => {
+    if (!settlementModalOrderId) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isCompletingSettlement) {
+        setSettlementModalOrderId(null);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [settlementModalOrderId, isCompletingSettlement]);
 
   useEffect(() => {
     setAvatarDraft(activeCourier?.avatarUrl || '');
@@ -287,6 +315,11 @@ export function CourierBoard({
       (o) => o.status === 'Em Rota' && o.assignedCourierId === activeCourier.id
     );
   }, [orders, activeCourier]);
+
+  const settlementModalOrder = useMemo(() => {
+    if (!settlementModalOrderId) return null;
+    return myActiveOrders.find((o) => o.id === settlementModalOrderId) || null;
+  }, [myActiveOrders, settlementModalOrderId]);
 
   const myCompletedOrders = useMemo(() => {
     if (!activeCourier) return [];
@@ -485,6 +518,27 @@ export function CourierBoard({
       await onConfirmCourierPixReceipt(orderId);
     } finally {
       setConfirmingReceiptOrderId(null);
+    }
+  };
+
+  const handleSaveModalPixKey = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeCourier || !modalPixKeyDraft.trim()) return;
+    setIsSavingModalPix(true);
+    try {
+      await onUpdateCourierPixKey(activeCourier.id, modalPixKeyDraft.trim());
+    } finally {
+      setIsSavingModalPix(false);
+    }
+  };
+
+  const handleConfirmSettlementAndComplete = async (orderId: string) => {
+    setIsCompletingSettlement(true);
+    try {
+      await onCompleteOrder(orderId);
+      setSettlementModalOrderId(null);
+    } finally {
+      setIsCompletingSettlement(false);
     }
   };
 
@@ -749,6 +803,7 @@ export function CourierBoard({
                       : order.merchantPhone);
 
                   const activeNotice = order.courierQuickNotice;
+                  const trackingUrl = buildTrackingUrl(order.code);
                   const whatsappMessage = buildQuickNoticeWhatsAppMessage({
                     stage: gpsStage,
                     orderCode: order.code,
@@ -758,6 +813,7 @@ export function CourierBoard({
                     vehicleModel: activeCourier.vehicleModel,
                     vehicleColor: activeCourier.vehicleColor,
                     vehiclePlate: activeCourier.plate,
+                    trackingUrl,
                   });
                   const whatsappHref = buildWhatsAppUrl({
                     phone:
@@ -1028,7 +1084,7 @@ export function CourierBoard({
                                 className="h-4 w-4 shrink-0"
                                 aria-hidden="true"
                               />
-                              <span>Enviar no WhatsApp</span>
+                              <span>WhatsApp (Lojista)</span>
                               <ExternalLink
                                 className="h-3.5 w-3.5 shrink-0 opacity-85"
                                 aria-hidden="true"
@@ -1036,7 +1092,7 @@ export function CourierBoard({
                             </a>
                           </div>
                         ) : (
-                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                             <button
                               type="button"
                               disabled={
@@ -1046,10 +1102,10 @@ export function CourierBoard({
                               onClick={() =>
                                 void triggerQuickNotice('chegando_entrega')
                               }
-                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3.5 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
+                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
                                 activeNotice?.type === 'chegando_entrega'
-                                  ? 'border-emerald-700 bg-emerald-700 text-white shadow-xs'
-                                  : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'
+                                  ? 'border-blue-700 bg-blue-700 text-white shadow-xs'
+                                  : 'border-blue-600 bg-blue-600 text-white hover:bg-blue-700'
                               }`}
                             >
                               <BellRing
@@ -1065,17 +1121,45 @@ export function CourierBoard({
                               </span>
                             </button>
 
+                            <button
+                              type="button"
+                              disabled={
+                                sendingNoticeKey ===
+                                `${order.id}:chegou_entrega`
+                              }
+                              onClick={() =>
+                                void triggerQuickNotice('chegou_entrega')
+                              }
+                              className={`min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-bold transition-colors disabled:opacity-60 ${
+                                activeNotice?.type === 'chegou_entrega'
+                                  ? 'border-emerald-700 bg-emerald-700 text-white shadow-xs'
+                                  : 'border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700'
+                              }`}
+                            >
+                              <MapPin
+                                className="h-4 w-4 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {sendingNoticeKey ===
+                                `${order.id}:chegou_entrega`
+                                  ? 'Enviando...'
+                                  : QUICK_NOTICE_META.chegou_entrega
+                                      .courierButtonLabel}
+                              </span>
+                            </button>
+
                             <a
                               href={whatsappHref}
                               target="_blank"
                               rel="noopener noreferrer"
-                              className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-3.5 py-2.5 text-xs font-bold text-white transition-colors hover:bg-green-700 shadow-xs"
+                              className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl border border-green-600 bg-green-600 px-3 py-2.5 text-xs font-bold text-white transition-colors hover:bg-green-700 shadow-xs"
                             >
                               <MessageCircle
                                 className="h-4 w-4 shrink-0"
                                 aria-hidden="true"
                               />
-                              <span>Enviar no WhatsApp</span>
+                              <span>WhatsApp (Destinatário)</span>
                               <ExternalLink
                                 className="h-3.5 w-3.5 shrink-0 opacity-85"
                                 aria-hidden="true"
@@ -1092,15 +1176,15 @@ export function CourierBoard({
                                 aria-hidden="true"
                               />
                               <span>
-                                Aviso ativo para o cliente: &ldquo;
+                                Aviso ativo em tempo real: &ldquo;
                                 {activeNotice.message}&rdquo; ·{' '}
                                 {formatDateTimeBR(activeNotice.updatedAt)}
                               </span>
                             </span>
                           ) : (
                             <span className="text-zinc-500">
-                              Toque em um aviso acima para notificar o cliente
-                              instantaneamente no app ou via WhatsApp.
+                              Toque em &ldquo;Estou chegando&rdquo; ou &ldquo;Cheguei&rdquo;
+                              para gravar o horário e notificar o lojista e o destinatário em tempo real.
                             </span>
                           )}
 
@@ -1119,6 +1203,29 @@ export function CourierBoard({
                             </button>
                           )}
                         </div>
+
+                        {order.courierNoticeHistory &&
+                          order.courierNoticeHistory.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 border-t border-emerald-200/70 pt-2">
+                              {order.courierNoticeHistory.map((evt, idx) => (
+                                <span
+                                  key={`${evt.type}-${evt.updatedAt}-${idx}`}
+                                  className="inline-flex items-center gap-1 rounded-md border border-emerald-200 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-700"
+                                >
+                                  <Clock
+                                    className="h-3 w-3 text-emerald-600 shrink-0"
+                                    aria-hidden="true"
+                                  />
+                                  <span>
+                                    {QUICK_NOTICE_META[evt.type].courierButtonLabel}
+                                  </span>
+                                  <span className="font-mono text-zinc-500">
+                                    {formatDateTimeBR(evt.updatedAt)}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
                       </div>
 
                       {/* Map + Sequential Stops List */}
@@ -1487,7 +1594,7 @@ export function CourierBoard({
                         </div>
                       </div>
 
-                      {/* Pagamento / Acerto via QR Code Pix vinculado ao código #RS-XXXX */}
+                      {/* Prévia opcional do QR Code Pix vinculado ao código #RS-XXXX */}
                       <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3.5 space-y-3">
                         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                           <div className="flex flex-wrap items-center gap-2">
@@ -1516,40 +1623,33 @@ export function CourierBoard({
                               <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
                               <span>
                                 {openPixQrOrderIds[order.id]
-                                  ? 'Ocultar QR Code Pix'
-                                  : 'Gerar QR Code Pix'}
+                                  ? 'Ocultar Prévia Pix'
+                                  : 'Prévia QR Code Pix'}
                               </span>
                             </button>
-
-                            {order.paymentStatus !== 'repassado' && (
-                              <button
-                                type="button"
-                                disabled={confirmingReceiptOrderId === order.id}
-                                onClick={() => void handleConfirmReceiptClick(order.id)}
-                                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
-                              >
-                                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                                <span>
-                                  {confirmingReceiptOrderId === order.id
-                                    ? 'Confirmando...'
-                                    : 'Confirmar Pagamento Recebido'}
-                                </span>
-                              </button>
-                            )}
                           </div>
                         </div>
 
                         {openPixQrOrderIds[order.id] && (
                           <PixQrCodeSettlement
                             orderCode={order.code}
-                            amount={settlement.netPayout}
-                            recipientName={activeCourier.name}
-                            pixKey={activeCourier.pixKey}
+                            amount={
+                              order.paymentMethod === 'pix_plataforma'
+                                ? order.grossTotal
+                                : settlement.netPayout
+                            }
+                            recipientName={
+                              order.paymentMethod === 'pix_plataforma'
+                                ? 'RotaJusta Porto Alegre'
+                                : activeCourier.name
+                            }
+                            pixKey={
+                              order.paymentMethod === 'pix_plataforma'
+                                ? platformPixKey
+                                : activeCourier.pixKey
+                            }
                             paymentStatus={order.paymentStatus}
                             viewerRole="courier"
-                            isConfirming={confirmingReceiptOrderId === order.id}
-                            onConfirmAction={() => handleConfirmReceiptClick(order.id)}
-                            confirmButtonLabel="Confirmar Pagamento Recebido"
                           />
                         )}
                       </div>
@@ -1559,12 +1659,14 @@ export function CourierBoard({
                           {allStopsDelivered ? (
                             <span className="font-semibold text-emerald-800">
                               Todas as {order.stops.length} paradas concluídas!
-                              Finalize a corrida para registrar a entrega.
+                              Clique em &ldquo;Concluir Entrega&rdquo; para abrir o
+                              acerto via QR Code Pix.
                             </span>
                           ) : (
                             <span>
                               Conclua todas as paradas ({deliveredCount}/
-                              {order.stops.length}) para liberar a finalização.
+                              {order.stops.length}) para liberar o acerto e a
+                              conclusão da entrega.
                             </span>
                           )}
                         </p>
@@ -1572,7 +1674,7 @@ export function CourierBoard({
                         <button
                           type="button"
                           disabled={!allStopsDelivered}
-                          onClick={() => void onCompleteOrder(order.id)}
+                          onClick={() => setSettlementModalOrderId(order.id)}
                           className={`min-h-[48px] w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-colors whitespace-nowrap shrink-0 ${
                             allStopsDelivered
                               ? 'bg-emerald-600 text-white hover:bg-emerald-700'
@@ -1580,7 +1682,7 @@ export function CourierBoard({
                           }`}
                         >
                           <Flag className="h-4 w-4" aria-hidden="true" />
-                          <span>Finalizar Entrega</span>
+                          <span>Concluir Entrega</span>
                         </button>
                       </div>
                     </div>
@@ -2832,6 +2934,211 @@ export function CourierBoard({
           </button>
         </div>
       </nav>
+
+      {/* ===================================================================== */}
+      {/* MODAL DE ACERTO VIA QR CODE PIX ANTES DE CONCLUIR A CORRIDA           */}
+      {/* ===================================================================== */}
+      {settlementModalOrder && (() => {
+        const modalSettlement = getCourierSettlementForOrder(
+          settlementModalOrder,
+          activeCourier.propulsion || 'Combustão',
+          activeCourier.vehicleType
+        );
+        const modalIsPlatformPix =
+          settlementModalOrder.paymentMethod === 'pix_plataforma';
+        const modalPixKey = modalIsPlatformPix
+          ? platformPixKey
+          : activeCourier.pixKey;
+        const modalAmount = modalIsPlatformPix
+          ? settlementModalOrder.grossTotal
+          : modalSettlement.netPayout;
+        const modalRecipient = modalIsPlatformPix
+          ? 'RotaJusta Porto Alegre'
+          : activeCourier.name;
+
+        return (
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="pix-settlement-modal-title"
+            className="fixed inset-0 z-50 flex items-center justify-center bg-zinc-950/60 p-4 backdrop-blur-xs overflow-y-auto"
+          >
+            <div className="my-auto w-full max-w-2xl rounded-2xl border border-zinc-200 bg-white shadow-2xl overflow-hidden">
+              <div className="flex items-start justify-between gap-4 border-b border-zinc-200 bg-emerald-50/70 px-5 py-4">
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-md bg-emerald-700 px-2 py-0.5 font-mono text-[11px] font-bold text-white">
+                      {settlementModalOrder.code}
+                    </span>
+                    <PaymentStatusBadge
+                      status={settlementModalOrder.paymentStatus}
+                      compact
+                    />
+                  </div>
+                  <h2
+                    id="pix-settlement-modal-title"
+                    className="font-display text-lg font-bold text-zinc-900"
+                  >
+                    Acerto via QR Code Pix · {settlementModalOrder.code}
+                  </h2>
+                  <p className="text-xs text-zinc-600">
+                    {settlementModalOrder.merchantName} ·{' '}
+                    {formatPaymentMethodLabel(
+                      settlementModalOrder.paymentMethod
+                    )}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  disabled={isCompletingSettlement}
+                  aria-label="Fechar modal de acerto"
+                  onClick={() => setSettlementModalOrderId(null)}
+                  className="rounded-lg border border-zinc-200 bg-white p-2 text-zinc-500 hover:bg-zinc-50 hover:text-zinc-900 disabled:opacity-50"
+                >
+                  <X className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+
+              <div className="p-5 space-y-4 max-h-[78vh] overflow-y-auto">
+                {/* Detalhamento Financeiro Obrigatório: Valor Bruto, Taxa Operacional e Ganho Líquido */}
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5">
+                    <span className="text-[11px] font-medium text-zinc-500 block">
+                      Valor Bruto da Corrida
+                    </span>
+                    <strong className="font-mono text-base font-bold text-zinc-900 tabular-nums">
+                      {formatBRL(settlementModalOrder.grossTotal)}
+                    </strong>
+                  </div>
+
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5">
+                    <span className="text-[11px] font-medium text-zinc-500 block">
+                      {modalSettlement.evBonus > 0
+                        ? 'Taxa Operacional (-50% Bike/EV)'
+                        : 'Taxa Operacional Inicial'}
+                    </span>
+                    <div className="flex flex-wrap items-baseline gap-1.5">
+                      {modalSettlement.evBonus > 0 && (
+                        <span className="font-mono text-xs text-zinc-400 line-through tabular-nums">
+                          {formatBRL(settlementModalOrder.standardPlatformFee)}
+                        </span>
+                      )}
+                      <strong className="font-mono text-base font-bold text-zinc-900 tabular-nums">
+                        {formatBRL(modalSettlement.platformFee)}
+                      </strong>
+                    </div>
+                    <span className="block text-[10px] text-zinc-500 mt-0.5">
+                      {modalSettlement.evBonus > 0
+                        ? `Economia de ${formatBRL(modalSettlement.evBonus)} aplicada`
+                        : PROGRESSIVE_PLATFORM_FEE_NOTE}
+                    </span>
+                  </div>
+
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3.5">
+                    <span className="text-[11px] font-semibold text-emerald-800 block">
+                      Ganho Líquido do Entregador
+                    </span>
+                    <strong className="font-mono text-lg font-extrabold text-emerald-700 tabular-nums">
+                      {formatBRL(modalSettlement.netPayout)}
+                    </strong>
+                  </div>
+                </div>
+
+                {/* QR Code Pix + Código Copia e Cola */}
+                <PixQrCodeSettlement
+                  orderCode={settlementModalOrder.code}
+                  amount={modalAmount}
+                  recipientName={modalRecipient}
+                  pixKey={modalPixKey}
+                  paymentStatus={settlementModalOrder.paymentStatus}
+                  viewerRole="courier"
+                />
+
+                {/* Cadastro rápido de Chave Pix caso o entregador ainda não tenha cadastrado */}
+                {!modalPixKey && !modalIsPlatformPix && (
+                  <form
+                    onSubmit={(e) => void handleSaveModalPixKey(e)}
+                    className="rounded-xl border border-zinc-200 bg-zinc-50 p-3.5 space-y-2.5"
+                  >
+                    <p className="text-xs font-semibold text-zinc-900">
+                      Cadastre sua Chave Pix agora para gerar o QR Code na hora:
+                    </p>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-12">
+                      <select
+                        aria-label="Tipo de Chave Pix"
+                        value={modalPixTypeDraft}
+                        onChange={(e) =>
+                          setModalPixTypeDraft(e.target.value as PixKeyType)
+                        }
+                        className="sm:col-span-4 rounded-lg border border-zinc-300 bg-white px-2.5 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      >
+                        {PIX_KEY_TYPES.map((type) => (
+                          <option key={type} value={type}>
+                            {type}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="text"
+                        value={modalPixKeyDraft}
+                        onChange={(e) => setModalPixKeyDraft(e.target.value)}
+                        placeholder={getPixKeyPlaceholder(modalPixTypeDraft)}
+                        className="sm:col-span-5 rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
+                      />
+                      <button
+                        type="submit"
+                        disabled={isSavingModalPix || !modalPixKeyDraft.trim()}
+                        className="sm:col-span-3 rounded-lg bg-zinc-900 px-3 py-2 text-xs font-semibold text-white hover:bg-zinc-800 disabled:opacity-50 whitespace-nowrap"
+                      >
+                        {isSavingModalPix ? 'Salvando...' : 'Gerar QR Code'}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
+
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-t border-zinc-200 bg-zinc-50 px-5 py-4">
+                <p className="text-xs text-zinc-600">
+                  Somente após confirmar o recebimento do pagamento a corrida{' '}
+                  <strong className="font-mono text-zinc-900">
+                    {settlementModalOrder.code}
+                  </strong>{' '}
+                  será concluída e liberada do painel ativo.
+                </p>
+
+                <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isCompletingSettlement}
+                    onClick={() => setSettlementModalOrderId(null)}
+                    className="min-h-[44px] rounded-xl border border-zinc-300 bg-white px-4 py-2 text-xs font-semibold text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    Voltar (Manter em Rota)
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCompletingSettlement}
+                    onClick={() =>
+                      void handleConfirmSettlementAndComplete(
+                        settlementModalOrder.id
+                      )
+                    }
+                    className="min-h-[44px] inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-2.5 text-xs sm:text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap shadow-xs"
+                  >
+                    <CheckCircle2 className="h-4 w-4" aria-hidden="true" />
+                    <span>
+                      {isCompletingSettlement
+                        ? 'Concluindo entrega...'
+                        : 'Confirmar Pagamento Recebido'}
+                    </span>
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }

@@ -10,6 +10,7 @@ import {
   MapPin,
   Package,
   Route,
+  Search,
   ShieldCheck,
   Store,
   Truck,
@@ -31,6 +32,7 @@ interface LandingPageProps {
   dbError: string | null;
   onOpenLogin: () => void;
   onOpenRegister: (presetChoice: RegProfileChoice) => void;
+  onOpenTracking: (code?: string) => void;
   onSeedTestData: () => Promise<void>;
 }
 
@@ -43,10 +45,12 @@ export function LandingPage({
   dbError,
   onOpenLogin,
   onOpenRegister,
+  onOpenTracking,
   onSeedTestData,
 }: LandingPageProps) {
   const [heroImgFailed, setHeroImgFailed] = useState(false);
   const [legalModalTab, setLegalModalTab] = useState<LegalDocTab | null>(null);
+  const [trackCodeDraft, setTrackCodeDraft] = useState('');
 
   const onlineText = isLoadingOnlineCount
     ? 'Verificando entregadores online em Porto Alegre...'
@@ -191,6 +195,37 @@ export function LandingPage({
                     Acesse no computador ou instale direto no celular.
                   </span>
                 </div>
+
+                {/* Acesso rápido à Página Pública de Rastreamento (#RS-XXXX) */}
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    onOpenTracking(trackCodeDraft.trim() || undefined);
+                  }}
+                  className="flex flex-col gap-2 rounded-xl border border-zinc-200 bg-zinc-50 p-3 sm:flex-row sm:items-center max-w-lg"
+                >
+                  <div className="relative flex-1">
+                    <Search
+                      className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400"
+                      aria-hidden="true"
+                    />
+                    <input
+                      type="text"
+                      value={trackCodeDraft}
+                      onChange={(e) => setTrackCodeDraft(e.target.value)}
+                      placeholder="Rastrear entrega (#RS-XXXX)"
+                      aria-label="Código do pedido para rastreamento público"
+                      className="w-full rounded-lg border border-zinc-300 bg-white pl-8 pr-3 py-2 font-mono text-xs font-semibold uppercase text-zinc-900 placeholder:normal-case placeholder:font-normal focus:border-emerald-600 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-emerald-600 bg-white px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-50 whitespace-nowrap shrink-0"
+                  >
+                    <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Rastrear Pedido</span>
+                  </button>
+                </form>
               </div>
 
               <div className="lg:col-span-6 space-y-3">

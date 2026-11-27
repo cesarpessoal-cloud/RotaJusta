@@ -9,9 +9,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
   Copy,
+  ExternalLink,
   Hash,
   MapPin,
+  MessageCircle,
   Package,
   PackageCheck,
   Plus,
@@ -70,7 +73,13 @@ import {
   formatPickupCode,
   normalizeCodeSearchQuery,
 } from '../utils/pickupCode';
-import { QUICK_NOTICE_META } from '../utils/quickNotice';
+import {
+  buildMerchantShareWhatsAppMessage,
+  buildTrackingUrl,
+  buildWhatsAppUrl,
+  extractBrPhoneDigits,
+  QUICK_NOTICE_META,
+} from '../utils/quickNotice';
 import {
   formatPickupScheduleLabel,
   getTodayDateInputValue,
@@ -2253,7 +2262,7 @@ export function MerchantPanel({
                     );
                   })()}
 
-                  {/* Aviso em Tempo Real do Entregador com 1 Toque */}
+                  {/* Aviso em Tempo Real do Entregador com 1 Toque + WhatsApp + Link Público */}
                   {order.status === 'Em Rota' && order.courierQuickNotice && (() => {
                     const notice = order.courierQuickNotice;
                     const meta = QUICK_NOTICE_META[notice.type];
@@ -2269,12 +2278,38 @@ export function MerchantPanel({
                         : meta.tone === 'amber'
                         ? 'bg-amber-600'
                         : 'bg-sky-600';
+                    const orderTrackingUrl = buildTrackingUrl(order.code);
+                    const nextStop =
+                      order.stops.find((s) => !s.delivered) || order.stops[0];
+                    const recipientPhone =
+                      (nextStop && extractBrPhoneDigits(nextStop.recipientNote)) ||
+                      (nextStop &&
+                        extractBrPhoneDigits(nextStop.expectedRecipient)) ||
+                      undefined;
+                    const shareWhatsAppUrl = buildWhatsAppUrl({
+                      phone: recipientPhone,
+                      message: buildMerchantShareWhatsAppMessage({
+                        orderCode: order.code,
+                        statusLabel: 'Em Rota',
+                        activeNotice: notice,
+                        courierName: order.assignedCourierName,
+                        vehicleSummary: formatVehicleModelAndColor(
+                          order.assignedCourierVehicleModel,
+                          order.assignedCourierVehicleColor
+                        ),
+                        plate:
+                          order.assignedCourierVehicleType === 'Bike'
+                            ? undefined
+                            : order.assignedCourierPlate,
+                        trackingUrl: orderTrackingUrl,
+                      }),
+                    });
 
                     return (
                       <div
                         role="status"
                         aria-live="polite"
-                        className={`mt-4 rounded-xl border-2 p-3.5 sm:p-4 shadow-xs space-y-2 ${toneClasses}`}
+                        className={`mt-4 rounded-xl border-2 p-3.5 sm:p-4 shadow-xs space-y-2.5 ${toneClasses}`}
                       >
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <div className="inline-flex items-center gap-2">
@@ -2315,6 +2350,101 @@ export function MerchantPanel({
                             : ''}
                           {meta.clientSubtext}
                         </p>
+
+                        {order.courierNoticeHistory &&
+                          order.courierNoticeHistory.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 pt-1">
+                              {order.courierNoticeHistory.map((evt, idx) => (
+                                <span
+                                  key={`${evt.type}-${evt.updatedAt}-${idx}`}
+                                  className="inline-flex items-center gap-1 rounded-md border border-black/10 bg-white/80 px-2 py-0.5 text-[10px] font-semibold text-zinc-800"
+                                >
+                                  <Clock className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                  <span>{QUICK_NOTICE_META[evt.type].courierButtonLabel}</span>
+                                  <span className="font-mono text-zinc-500">
+                                    {formatDateTimeBR(evt.updatedAt)}
+                                  </span>
+                                </span>
+                              ))}
+                            </div>
+                          )}
+
+                        <div className="flex flex-wrap items-center gap-2 pt-1">
+                          <a
+                            href={shareWhatsAppUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-green-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-green-700 whitespace-nowrap"
+                          >
+                            <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                            <span>Enviar no WhatsApp ({order.code})</span>
+                            <ExternalLink className="h-3 w-3 opacity-85" aria-hidden="true" />
+                          </a>
+
+                          <a
+                            href={orderTrackingUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 whitespace-nowrap"
+                          >
+                            <ExternalLink className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                            <span>Página de Rastreio</span>
+                          </a>
+                        </div>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Atalho de Rastreamento Público + WhatsApp quando ainda não há aviso ativo */}
+                  {order.status !== 'Entregue' && !order.courierQuickNotice && (() => {
+                    const orderTrackingUrl = buildTrackingUrl(order.code);
+                    const nextStop =
+                      order.stops.find((s) => !s.delivered) || order.stops[0];
+                    const recipientPhone =
+                      (nextStop && extractBrPhoneDigits(nextStop.recipientNote)) ||
+                      (nextStop &&
+                        extractBrPhoneDigits(nextStop.expectedRecipient)) ||
+                      undefined;
+                    const shareWhatsAppUrl = buildWhatsAppUrl({
+                      phone: recipientPhone,
+                      message: buildMerchantShareWhatsAppMessage({
+                        orderCode: order.code,
+                        statusLabel:
+                          order.status === 'Em Rota'
+                            ? 'Entregador em rota'
+                            : 'Aguardando entregador',
+                        courierName: order.assignedCourierName,
+                        vehicleSummary: formatVehicleModelAndColor(
+                          order.assignedCourierVehicleModel,
+                          order.assignedCourierVehicleColor
+                        ),
+                        plate:
+                          order.assignedCourierVehicleType === 'Bike'
+                            ? undefined
+                            : order.assignedCourierPlate,
+                        trackingUrl: orderTrackingUrl,
+                      }),
+                    });
+                    return (
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <a
+                          href={shareWhatsAppUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-green-300 bg-green-50 px-3 py-1.5 text-xs font-semibold text-green-800 hover:bg-green-100 whitespace-nowrap"
+                        >
+                          <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                          <span>Enviar Rastreio no WhatsApp ({order.code})</span>
+                        </a>
+                        <a
+                          href={orderTrackingUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50 whitespace-nowrap"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
+                          <span>Abrir Página de Rastreio</span>
+                        </a>
                       </div>
                     );
                   })()}

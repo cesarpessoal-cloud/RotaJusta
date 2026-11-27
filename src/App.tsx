@@ -4,7 +4,9 @@ import {
   BellRing,
   CheckCircle2,
   Eye,
+  ExternalLink,
   Loader2,
+  MessageCircle,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -17,6 +19,7 @@ import { LegalDocTab, LegalModal } from './components/LegalModal';
 import { MerchantPanel } from './components/MerchantPanel';
 import { MyAccountModal } from './components/MyAccountModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PublicTrackingPage } from './components/PublicTrackingPage';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import {
   acceptDeliveryInSupabase,
@@ -49,14 +52,28 @@ import {
 } from './lib/supabaseService';
 import {
   ApprovalStatus,
+  CourierQuickNotice,
   CourierQuickNoticeType,
   Order,
   Profile,
   Rating,
 } from './types';
-import { formatBRL, getCourierSettlementForOrder } from './utils/pricing';
-import { getQuickNoticeMessage } from './utils/quickNotice';
+import { formatVehicleModelAndColor } from './utils/courierIdentity';
 import {
+  formatBRL,
+  formatDateTimeBR,
+  getCourierSettlementForOrder,
+} from './utils/pricing';
+import {
+  buildMerchantShareWhatsAppMessage,
+  buildTrackingUrl,
+  buildWhatsAppUrl,
+  extractBrPhoneDigits,
+  getQuickNoticeMessage,
+  QUICK_NOTICE_META,
+} from './utils/quickNotice';
+import {
+  playDiscreteQuickNoticeChime,
   playRotaJustaAlert,
   requestBrowserNotificationPermission,
   showBrowserDeliveryNotification,
@@ -64,9 +81,20 @@ import {
 } from './utils/soundAlert';
 import { isOrderCompatibleWithVehicle } from './utils/vehicleCompatibility';
 
+function getInitialTrackingCodeFromUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  return (params.get('rastreio') || params.get('pedido') || '').trim();
+}
+
 export default function App() {
+  const initialTrackingCode = useMemo(() => getInitialTrackingCodeFromUrl(), []);
   const [currentUser, setCurrentUser] = useState<Profile | null>(null);
-  const [unauthView, setUnauthView] = useState<'landing' | 'auth'>('landing');
+  const [unauthView, setUnauthView] = useState<'landing' | 'auth' | 'tracking'>(
+    () => (initialTrackingCode ? 'tracking' : 'landing')
+  );
+  const [trackingCodeQuery, setTrackingCodeQuery] =
+    useState<string>(initialTrackingCode);
   const [authInitialTab, setAuthInitialTab] = useState<AuthTab>('entrar');
   const [authInitialRegChoice, setAuthInitialRegChoice] =
     useState<RegProfileChoice>('pf_solicitante');
@@ -94,11 +122,16 @@ export default function App() {
   const [dbError, setDbError] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [newOfferBanner, setNewOfferBanner] = useState<Order | null>(null);
+  const [merchantQuickNoticeAlert, setMerchantQuickNoticeAlert] = useState<{
+    order: Order;
+    notice: CourierQuickNotice;
+  } | null>(null);
 
   const merchantFormRef = useRef<HTMLFormElement | null>(null);
   const currentUserRef = useRef<Profile | null>(null);
   const profilesRef = useRef<Profile[]>([]);
   const approvedCouriersRef = useRef<Profile[]>([]);
+  const ordersRef = useRef<Order[]>([]);
   const activeCourierIdRef = useRef<string>('');
   const adminViewRef = useRef<AdminSupervisionView>('admin');
   const seenRealtimeOrderIdsRef = useRef<Set<string>>(new Set());
@@ -114,6 +147,10 @@ export default function App() {
   useEffect(() => {
     approvedCouriersRef.current = approvedCouriers;
   }, [approvedCouriers]);
+
+  useEffect(() => {
+    ordersRef.current = orders;
+  }, [orders]);
 
   useEffect(() => {
     activeCourierIdRef.current = activeCourierId;
@@ -138,6 +175,30 @@ export default function App() {
     const timer = window.setTimeout(() => setNewOfferBanner(null), 16000);
     return () => window.clearTimeout(timer);
   }, [newOfferBanner]);
+
+  useEffect(() => {
+    if (!merchantQuickNoticeAlert) return;
+    const timer = window.setTimeout(
+      () => setMerchantQuickNoticeAlert(null),
+      25000
+    );
+    return () => window.clearTimeout(timer);
+  }, [merchantQuickNoticeAlert]);
+
+  useEffect(() => {
+    if (
+      currentUser?.role === 'lojista' ||
+      (currentUser?.role === 'admin' && adminView === 'lojista')
+    ) {
+      const unlock = () => {
+        void unlockAudioEngine();
+      };
+      window.addEventListener('pointerdown', unlock, { once: true });
+      return () => {
+        window.removeEventListener('pointerdown', unlock);
+      };
+    }
+  }, [currentUser?.id, currentUser?.role, adminView]);
 
   const activeSupervisedOrLoggedCourier = useMemo(() => {
     if (!currentUser) return undefined;
@@ -358,6 +419,18 @@ export default function App() {
                 }
               }
 
+              const previousOrder = ordersRef.current.find(
+                (o) => o.id === updatedOrder.id
+              );
+              const prevNotice = previousOrder?.courierQuickNotice;
+              const nextNotice = updatedOrder.courierQuickNotice;
+              const isNewQuickNotice = Boolean(
+                nextNotice &&
+                  (!prevNotice ||
+                    prevNotice.updatedAt !== nextNotice.updatedAt ||
+                    prevNotice.type !== nextNotice.type)
+              );
+
               setOrders((prev) =>
                 prev.some((o) => o.id === updatedOrder.id)
                   ? prev.map((o) =>
@@ -378,6 +451,25 @@ export default function App() {
                 setWaitingOrders((prev) =>
                   prev.filter((o) => o.id !== updatedOrder.id)
                 );
+              }
+
+              if (isNewQuickNotice && nextNotice) {
+                const activeUser = currentUserRef.current;
+                const isViewingMerchantWorkspace = Boolean(
+                  activeUser &&
+                    ((activeUser.role === 'lojista' &&
+                      (!updatedOrder.merchantId ||
+                        updatedOrder.merchantId === activeUser.id)) ||
+                      (activeUser.role === 'admin' &&
+                        adminViewRef.current === 'lojista'))
+                );
+                if (isViewingMerchantWorkspace) {
+                  setMerchantQuickNoticeAlert({
+                    order: updatedOrder,
+                    notice: nextNotice,
+                  });
+                  void playDiscreteQuickNoticeChime();
+                }
               }
             } catch {
               // Silencioso em background
@@ -608,6 +700,24 @@ export default function App() {
     setAuthInitialTab('cadastrar');
     setAuthInitialRegChoice(presetChoice);
     setUnauthView('auth');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleOpenTracking = (code?: string) => {
+    setTrackingCodeQuery(code || '');
+    setUnauthView('tracking');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleBackToLandingFromTracking = () => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('rastreio');
+      url.searchParams.delete('pedido');
+      window.history.replaceState({}, '', url.toString());
+    }
+    setTrackingCodeQuery('');
+    setUnauthView('landing');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -927,24 +1037,25 @@ export default function App() {
       profiles.find((p) => p.id === targetOrder.assignedCourierId);
 
     try {
-      const { updatedOrder, autoCompleted } =
-        await confirmDeliveryStopInSupabase({
-          order: targetOrder,
-          stopId,
-          receiverName,
-          proofPhotoDataUrl,
-          courier: assignedCourier,
-        });
+      const { updatedOrder } = await confirmDeliveryStopInSupabase({
+        order: targetOrder,
+        stopId,
+        receiverName,
+        proofPhotoDataUrl,
+        courier: assignedCourier,
+      });
 
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId ? updatedOrder : o))
       );
 
-      if (autoCompleted) {
-        const bonusMsg =
-          (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com -50% Taxa Bike/EV)' : '';
+      const allStopsDone =
+        updatedOrder.stops.length > 0 &&
+        updatedOrder.stops.every((s) => s.delivered);
+
+      if (allStopsDone) {
         showToast(
-          `Última parada confirmada! Pedido ${updatedOrder.code} finalizado${bonusMsg} no Supabase.`
+          `Todas as paradas de ${updatedOrder.code} confirmadas! Clique em "Concluir Entrega" para abrir o acerto via QR Code Pix.`
         );
       } else {
         showToast(`Parada confirmada no Supabase para ${receiverName}.`);
@@ -972,11 +1083,13 @@ export default function App() {
         ? currentUser
         : undefined) ||
       profiles.find((p) => p.id === targetOrder.assignedCourierId);
+    const knownProfiles = profiles.length > 0 ? profiles : approvedCouriers;
 
     try {
       const updatedOrder = await completeDeliveryInSupabase(
         orderId,
-        assignedCourier
+        assignedCourier,
+        knownProfiles
       );
       setOrders((prev) =>
         prev.map((o) => (o.id === orderId ? updatedOrder : o))
@@ -984,7 +1097,7 @@ export default function App() {
       const bonusMsg =
         (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com -50% Taxa Bike/EV)' : '';
       showToast(
-        `Rota ${updatedOrder.code} finalizada${bonusMsg} no Supabase!`
+        `Pagamento confirmado e corrida ${updatedOrder.code} concluída${bonusMsg} no Supabase!`
       );
     } catch (err) {
       const msg =
@@ -1314,11 +1427,17 @@ export default function App() {
     }
   };
 
-  // Show Landing Page or Login / Signup gate when no user is logged into the session
+  // Show Landing Page, Public Tracking Page, or Login / Signup gate when no user is logged into the session
   if (!currentUser) {
     return (
       <>
-        {unauthView === 'landing' ? (
+        {unauthView === 'tracking' ? (
+          <PublicTrackingPage
+            initialCode={trackingCodeQuery}
+            onBackToLanding={handleBackToLandingFromTracking}
+            onOpenLogin={handleOpenLogin}
+          />
+        ) : unauthView === 'landing' ? (
           <LandingPage
             onlineCouriersCount={landingOnlineCouriersCount}
             isLoadingOnlineCount={isLoadingOnlineCount}
@@ -1328,6 +1447,7 @@ export default function App() {
             dbError={dbError}
             onOpenLogin={handleOpenLogin}
             onOpenRegister={handleOpenRegister}
+            onOpenTracking={handleOpenTracking}
             onSeedTestData={handleSeedTestData}
           />
         ) : (
@@ -1397,6 +1517,102 @@ export default function App() {
           isCourierViewport ? 'max-w-5xl' : 'max-w-[1440px]'
         }`}
       >
+        {merchantQuickNoticeAlert &&
+          (isMerchant || (isAdmin && adminView === 'lojista')) && (() => {
+            const { order: alertOrder, notice } = merchantQuickNoticeAlert;
+            const meta = QUICK_NOTICE_META[notice.type];
+            const trackUrl = buildTrackingUrl(alertOrder.code);
+            const nextStop =
+              alertOrder.stops.find((s) => !s.delivered) ||
+              alertOrder.stops[0];
+            const recipientPhone =
+              (nextStop && extractBrPhoneDigits(nextStop.recipientNote)) ||
+              (nextStop && extractBrPhoneDigits(nextStop.expectedRecipient)) ||
+              undefined;
+            const shareHref = buildWhatsAppUrl({
+              phone: recipientPhone,
+              message: buildMerchantShareWhatsAppMessage({
+                orderCode: alertOrder.code,
+                statusLabel: 'Em Rota',
+                activeNotice: notice,
+                courierName: alertOrder.assignedCourierName,
+                vehicleSummary: formatVehicleModelAndColor(
+                  alertOrder.assignedCourierVehicleModel,
+                  alertOrder.assignedCourierVehicleColor
+                ),
+                plate:
+                  alertOrder.assignedCourierVehicleType === 'Bike'
+                    ? undefined
+                    : alertOrder.assignedCourierPlate,
+                trackingUrl: trackUrl,
+              }),
+            });
+
+            return (
+              <div
+                role="alert"
+                aria-live="assertive"
+                className="rounded-xl border-2 border-emerald-500 bg-emerald-600 px-4 py-3.5 text-white shadow-lg flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <div className="flex items-start gap-3">
+                  <BellRing
+                    className="h-5 w-5 text-white shrink-0 mt-0.5 animate-bounce"
+                    aria-hidden="true"
+                  />
+                  <div className="space-y-0.5 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="rounded bg-zinc-950 px-2 py-0.5 font-mono text-xs font-black text-white">
+                        {alertOrder.code}
+                      </span>
+                      <span className="font-mono text-[11px] text-emerald-100">
+                        {formatDateTimeBR(notice.updatedAt)}
+                      </span>
+                    </div>
+                    <p className="text-sm font-bold tracking-tight">
+                      {meta.clientHeadline}
+                      {notice.stopSequence && alertOrder.stops.length > 1
+                        ? ` (Parada #${notice.stopSequence})`
+                        : ''}
+                    </p>
+                    <p className="text-emerald-50">
+                      {alertOrder.assignedCourierName
+                        ? `Entregador: ${alertOrder.assignedCourierName} · `
+                        : ''}
+                      {meta.clientSubtext}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <a
+                    href={shareHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap"
+                  >
+                    <MessageCircle className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Enviar no WhatsApp</span>
+                  </a>
+                  <a
+                    href={trackUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="inline-flex items-center gap-1 rounded-lg border border-white/40 bg-white/15 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/25 whitespace-nowrap"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" aria-hidden="true" />
+                    <span>Rastreio</span>
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => setMerchantQuickNoticeAlert(null)}
+                    className="rounded-lg border border-white/40 bg-white/15 px-3 py-1.5 text-xs font-semibold text-white hover:bg-white/25"
+                  >
+                    Ciente
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+
         {newOfferBanner && activeSupervisedOrLoggedCourier?.isOnline && (
           <div
             role="alert"
@@ -1517,6 +1733,7 @@ export default function App() {
                 orders={orders}
                 ratings={ratings}
                 activeCourierId={currentUser.id}
+                platformPixKey={platformPixKey}
                 onSelectCourier={setActiveCourierId}
                 onAcceptOrder={handleAcceptOrder}
                 onSendQuickNotice={handleSendCourierQuickNotice}
@@ -1582,6 +1799,7 @@ export default function App() {
                 orders={orders}
                 ratings={ratings}
                 activeCourierId={activeCourierId}
+                platformPixKey={platformPixKey}
                 onSelectCourier={setActiveCourierId}
                 onAcceptOrder={handleAcceptOrder}
                 onSendQuickNotice={handleSendCourierQuickNotice}

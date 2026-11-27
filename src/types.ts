@@ -37,7 +37,8 @@ export type PickupScheduleMode = 'imediata' | 'agendada';
 export type CourierQuickNoticeType =
   | 'chegando_coleta'
   | 'chegou_coleta'
-  | 'chegando_entrega';
+  | 'chegando_entrega'
+  | 'chegou_entrega';
 
 export interface CourierQuickNotice {
   type: CourierQuickNoticeType;
@@ -160,6 +161,7 @@ export interface Order {
   evBonusApplied?: number;
   netCourierPayout?: number;
   courierQuickNotice?: CourierQuickNotice;
+  courierNoticeHistory?: CourierQuickNotice[];
   createdAt: string;
   acceptedAt?: string;
   completedAt?: string;
