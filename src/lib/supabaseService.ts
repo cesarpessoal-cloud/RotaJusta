@@ -5,6 +5,7 @@ import {
   CourierQuickNotice,
   CourierQuickNoticeType,
   DeliveryStop,
+  MerchantStorefrontConfig,
   Order,
   OrderFlowDirection,
   OrderStatus,
@@ -28,6 +29,13 @@ import {
   buildCourierQuickNotice,
   isCourierQuickNoticeType,
 } from '../utils/quickNotice';
+import {
+  decodeStorefrontMetaFromCompanyName,
+  decodeStorefrontOrderTag,
+  encodeStorefrontMetaInCompanyName,
+  encodeStorefrontOrderTag,
+  formatStorefrontItemsSummaryText,
+} from '../utils/storefront';
 import { normalizePlateForDisplay } from '../utils/courierIdentity';
 import { verifyTotpCode } from '../utils/totp';
 import { supabase } from './supabase';
@@ -239,9 +247,9 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
   const formattedDoc = formatCpfOrCnpj(docDigits, resolvedPersonType);
 
   const fallbackMeta = decodeCourierIdentityMeta(row.company_legal_name);
-  const cleanCompanyLegalName = fallbackMeta
-    ? undefined
-    : row.company_legal_name || undefined;
+  const { cleanLegalName, storefront } = fallbackMeta
+    ? { cleanLegalName: undefined, storefront: undefined }
+    : decodeStorefrontMetaFromCompanyName(row.company_legal_name);
 
   const resolvedAvatar = row.avatar_url || fallbackMeta?.a || undefined;
   const resolvedModel = row.vehicle_model || fallbackMeta?.m || undefined;
@@ -254,18 +262,18 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
     role: row.role || 'entregador',
     personType: resolvedPersonType,
     name: row.name,
-    companyLegalName: cleanCompanyLegalName,
+    companyLegalName: cleanLegalName,
     businessName:
-      resolvedPersonType === 'PJ'
-        ? cleanCompanyLegalName || row.name
-        : undefined,
+      storefront?.storeName ||
+      (resolvedPersonType === 'PJ' ? cleanLegalName || row.name : undefined),
     document: formattedDoc,
     documentNumber: docDigits || undefined,
     phone: row.phone || '',
     email: row.email || undefined,
     acceptsMarketing: Boolean(row.accepts_marketing),
     pixKey: row.pix_key || undefined,
-    neighborhood: 'Porto Alegre',
+    neighborhood: storefront?.storeNeighborhood || 'Porto Alegre',
+    address: storefront?.storeAddress || undefined,
     twoFactorEnabled: Boolean(row.two_factor_enabled),
     avatarUrl: resolvedAvatar,
     vehicleType,
@@ -286,6 +294,7 @@ function normalizeProfileFromRow(row: DbProfileRow): Profile {
         : 0,
     isOnline: Boolean(row.is_online),
     approvalStatus: mapDbStatusToApproval(row.status),
+    storefront,
     createdAt: row.created_at || new Date().toISOString(),
   };
 }
@@ -500,6 +509,8 @@ function normalizeOrderFromRows(
       new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime()
   );
 
+  const extractedStorefrontOrder = decodeStorefrontOrderTag(rawSource);
+
   const cleanMerchantName =
     rawSource
       .replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '')
@@ -509,6 +520,7 @@ function normalizeOrderFromRows(
       .replace(/\s*\[AGD:[^\]]*\]/g, '')
       .replace(/\s*\[AVISO:[^\]]*\]/g, '')
       .replace(/\s*\[EVT:[^\]]*\]/g, '')
+      .replace(/\s*\[VORD:[^\]]*\]/g, '')
       .trim() || 'Lojista Porto Alegre';
 
   let merchantProfile = extractedMerchantId
@@ -573,6 +585,7 @@ function normalizeOrderFromRows(
             accessNote: row.access_notes || 'Térreo',
           }
         : undefined,
+    storefrontOrder: extractedStorefrontOrder,
     stops,
     grossTotal:
       row.total_price !== null && row.total_price !== undefined
@@ -1249,6 +1262,25 @@ export async function adminUpdateProfileInSupabase(
         })
       : null;
 
+  let preservedStorefront: MerchantStorefrontConfig | undefined;
+  if (input.role === 'lojista' || input.role === 'admin') {
+    const { data: existingRow } = await supabase
+      .from('profiles')
+      .select('company_legal_name')
+      .eq('id', input.profileId)
+      .maybeSingle();
+    const existingLegalRaw = (
+      existingRow as { company_legal_name?: string | null } | null
+    )?.company_legal_name;
+    preservedStorefront =
+      decodeStorefrontMetaFromCompanyName(existingLegalRaw).storefront;
+  }
+
+  const baseCompanyLegalName =
+    input.personType === 'PJ'
+      ? input.companyLegalName?.trim() || cleanName
+      : undefined;
+
   const basePayload: Record<string, unknown> = {
     name: cleanName,
     phone: cleanPhone,
@@ -1256,10 +1288,10 @@ export async function adminUpdateProfileInSupabase(
     role: input.role,
     person_type: input.personType,
     document_number: docDigits || null,
-    company_legal_name:
-      input.personType === 'PJ'
-        ? input.companyLegalName?.trim() || cleanName
-        : null,
+    company_legal_name: encodeStorefrontMetaInCompanyName(
+      baseCompanyLegalName,
+      preservedStorefront
+    ),
     status: mapApprovalToDbStatus(input.approvalStatus),
     pix_key: input.pixKey?.trim() || null,
     vehicle_type: isDriverOrCourier ? input.vehicleType ?? null : null,
@@ -1922,6 +1954,9 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     const deadline = order.pickupSchedule.deadlineAt || '';
     sourceTags.push(`[AGD:${modeTag}|${ready}|${deadline}]`);
   }
+  if (order.storefrontOrder) {
+    sourceTags.push(encodeStorefrontOrderTag(order.storefrontOrder));
+  }
   const sourceChannelWithTags =
     sourceTags.length > 0 ? `${baseName} ${sourceTags.join(' ')}` : baseName;
 
@@ -1931,7 +1966,11 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     delivery_region: order.destinationNeighborhood,
     distance_km: order.distanceKm ?? null,
     package_count: order.packageCount,
-    cargo_description: order.freightDetails?.cargoDescription ?? null,
+    cargo_description:
+      order.freightDetails?.cargoDescription ??
+      (order.storefrontOrder
+        ? formatStorefrontItemsSummaryText(order.storefrontOrder)
+        : null),
     cargo_size: order.freightDetails?.cargoSize ?? null,
     has_helper: Boolean(order.freightDetails?.includeHelper),
     access_notes: order.freightDetails?.accessNote ?? null,
@@ -2457,5 +2496,117 @@ export async function seedInitialSupabaseData(): Promise<{
   return {
     profiles: [adminProfile, motoEvProfile, utilityProfile],
     orders: [order2, order1],
+  };
+}
+
+export async function saveMerchantStorefrontInSupabase(params: {
+  profileId: string;
+  storefront: MerchantStorefrontConfig;
+  storePixKey?: string;
+}): Promise<Profile> {
+  const { data: existingRow, error: fetchError } = await supabase
+    .from('profiles')
+    .select('company_legal_name')
+    .eq('id', params.profileId)
+    .single();
+
+  if (fetchError) {
+    throw new Error(fetchError.message);
+  }
+
+  const existingRaw = (
+    existingRow as { company_legal_name?: string | null } | null
+  )?.company_legal_name;
+  const { cleanLegalName } = decodeStorefrontMetaFromCompanyName(existingRaw);
+
+  const encodedCompanyLegal = encodeStorefrontMetaInCompanyName(
+    cleanLegalName,
+    params.storefront
+  );
+
+  const updateFields: Record<string, unknown> = {
+    company_legal_name: encodedCompanyLegal,
+  };
+  if (params.storePixKey !== undefined) {
+    updateFields.pix_key = params.storePixKey.trim() || null;
+  }
+
+  const { data, error } = await runProfileQuery((cols) =>
+    supabase
+      .from('profiles')
+      .update(updateFields)
+      .eq('id', params.profileId)
+      .select(cols)
+      .single()
+  );
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeProfileFromRow(data as unknown as DbProfileRow);
+}
+
+export interface PublicStorefrontData {
+  merchant: Profile;
+  storefront: MerchantStorefrontConfig;
+  platformPixKey: string | null;
+}
+
+export async function fetchPublicMerchantStorefrontInSupabase(
+  merchantId: string
+): Promise<PublicStorefrontData | null> {
+  const cleanId = merchantId.trim();
+  if (!cleanId) return null;
+
+  const { data: row, error } = await supabase
+    .from('profiles')
+    .select(
+      'id, name, phone, person_type, company_legal_name, role, pix_key, rating_avg, rating_count, status, created_at'
+    )
+    .eq('id', cleanId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+  if (!row) return null;
+
+  const merchant = normalizeProfileFromRow(row as unknown as DbProfileRow);
+  const platformPixKey = await fetchPlatformPixKey().catch(() => null);
+
+  const baseStorefront: MerchantStorefrontConfig = merchant.storefront || {
+    products: [],
+  };
+
+  if (!baseStorefront.storeAddress) {
+    const { data: recentDeliveries } = await supabase
+      .from('deliveries')
+      .select('pickup_address, source_channel')
+      .ilike('source_channel', `%[UID:${cleanId}]%`)
+      .order('created_at', { ascending: false })
+      .limit(1);
+
+    const latestPickup = (
+      recentDeliveries?.[0] as { pickup_address?: string | null } | undefined
+    )?.pickup_address;
+    if (latestPickup) {
+      const parsed = extractNeighborhoodFromAddress(latestPickup);
+      const coords = resolvePortoAlegreCoordinates(
+        parsed.address,
+        parsed.neighborhood,
+        0
+      );
+      baseStorefront.storeAddress = parsed.address;
+      baseStorefront.storeNeighborhood = parsed.neighborhood;
+      baseStorefront.storeLat = coords.lat;
+      baseStorefront.storeLng = coords.lng;
+    }
+  }
+
+  return {
+    merchant,
+    storefront: baseStorefront,
+    platformPixKey,
   };
 }

@@ -60,6 +60,46 @@ export interface FreightDetails {
   accessNote: string;
 }
 
+export interface StoreProduct {
+  id: string;
+  name: string;
+  description: string;
+  price: number;
+  imageUrl?: string;
+  recommendedVehicle: VehicleType;
+  active: boolean;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface MerchantStorefrontConfig {
+  storeName?: string;
+  storeDescription?: string;
+  storeCep?: string;
+  storeAddress?: string;
+  storeNeighborhood?: string;
+  storeLat?: number;
+  storeLng?: number;
+  products: StoreProduct[];
+}
+
+export interface StorefrontOrderItemSummary {
+  productId: string;
+  name: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+}
+
+export interface StorefrontOrderSummary {
+  items: StorefrontOrderItemSummary[];
+  productsSubtotal: number;
+  freightTotal: number;
+  grandTotal: number;
+  customerName: string;
+  customerPhone?: string;
+}
+
 export interface Profile {
   id: string;
   role: UserRole;
@@ -90,6 +130,7 @@ export interface Profile {
   ratingCount?: number;
   isOnline?: boolean;
   approvalStatus: ApprovalStatus;
+  storefront?: MerchantStorefrontConfig;
   createdAt: string;
 }
 
@@ -139,6 +180,7 @@ export interface Order {
   distanceKm?: number; // For 'rapida' and 'frete'
   packageCount: number; // 1 for 'rapida'/'frete', N for 'rota'
   freightDetails?: FreightDetails;
+  storefrontOrder?: StorefrontOrderSummary;
   stops: DeliveryStop[];
   grossTotal: number; // Valor total do pedido pago pelo lojista
   standardPlatformFee: number; // Taxa operacional inicial da plataforma conforme modal

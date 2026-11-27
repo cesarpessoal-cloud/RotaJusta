@@ -22,7 +22,9 @@ import {
   Search,
   Send,
   ShieldCheck,
+  ShoppingBag,
   Sparkles,
+  Store,
   Trash2,
   Truck,
   X,
@@ -43,6 +45,7 @@ import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
 import {
   CargoSize,
   DeliveryStop,
+  MerchantStorefrontConfig,
   Order,
   OrderFlowDirection,
   OrderStatus,
@@ -95,6 +98,7 @@ import {
 import { MapStopPoint, PortoAlegreMap } from './PortoAlegreMap';
 import { PixQrCodeSettlement } from './PixQrCodeSettlement';
 import { OrderRatingBox, RatingBadge } from './RatingWidgets';
+import { MerchantVitrineTab } from './MerchantVitrineTab';
 
 interface MerchantPanelProps {
   lockedMerchant?: Profile;
@@ -118,6 +122,12 @@ interface MerchantPanelProps {
     stars: number;
     comment?: string;
   }) => Promise<void>;
+  onSaveStorefront?: (params: {
+    profileId: string;
+    storefront: MerchantStorefrontConfig;
+    storePixKey?: string;
+  }) => Promise<Profile>;
+  onPreviewStorefront?: (merchantId: string) => void;
   formRef?: React.RefObject<HTMLFormElement | null>;
 }
 
@@ -158,6 +168,8 @@ export function MerchantPanel({
   onCreateOrder,
   onConfirmPixPayment,
   onSubmitRating,
+  onSaveStorefront,
+  onPreviewStorefront,
   formRef,
 }: MerchantPanelProps) {
   const activeMerchant = useMemo(
@@ -170,6 +182,7 @@ export function MerchantPanel({
 
   const evaluatorId = currentEvaluatorId || activeMerchant?.id || '';
 
+  const [merchantTab, setMerchantTab] = useState<'entregas' | 'vitrine'>('entregas');
   const [flowDirection, setFlowDirection] = useState<OrderFlowDirection>(
     initialFlowDirection
   );
@@ -859,6 +872,12 @@ export function MerchantPanel({
           order.pickupNeighborhood.toLowerCase().includes(q) ||
           order.destinationNeighborhood.toLowerCase().includes(q) ||
           (order.freightDetails?.cargoDescription.toLowerCase().includes(q) ??
+            false) ||
+          (order.storefrontOrder?.customerName.toLowerCase().includes(q) ??
+            false) ||
+          (order.storefrontOrder?.items.some((it) =>
+            it.name.toLowerCase().includes(q)
+          ) ??
             false)
         );
       }
@@ -941,8 +960,65 @@ export function MerchantPanel({
         </div>
       </section>
 
-      {/* Atalhos Intuitivos: Quero enviar um item vs Quero receber um item */}
-      <section aria-label="Ações rápidas do solicitante" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+      {activeMerchant && onSaveStorefront && (
+        <div
+          role="tablist"
+          aria-label="Seções do Painel do Lojista"
+          className="flex flex-wrap items-center gap-2 border-b border-zinc-200 pb-3"
+        >
+          <button
+            type="button"
+            role="tab"
+            aria-selected={merchantTab === 'entregas'}
+            onClick={() => setMerchantTab('entregas')}
+            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-xs sm:text-sm font-semibold transition-colors ${
+              merchantTab === 'entregas'
+                ? 'border-zinc-900 bg-zinc-900 text-white shadow-xs'
+                : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+            }`}
+          >
+            <Send className="h-4 w-4" aria-hidden="true" />
+            <span>Solicitar Entregas &amp; Pedidos</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={merchantTab === 'vitrine'}
+            onClick={() => setMerchantTab('vitrine')}
+            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-xs sm:text-sm font-semibold transition-colors ${
+              merchantTab === 'vitrine'
+                ? 'border-emerald-700 bg-emerald-700 text-white shadow-xs'
+                : 'border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:bg-emerald-100/70'
+            }`}
+          >
+            <Store className="h-4 w-4" aria-hidden="true" />
+            <span>Minha Vitrine</span>
+            {activeMerchant.storefront?.products.length ? (
+              <span
+                className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] font-bold tabular-nums ${
+                  merchantTab === 'vitrine'
+                    ? 'bg-white/20 text-white'
+                    : 'bg-emerald-200/80 text-emerald-950'
+                }`}
+              >
+                {activeMerchant.storefront.products.filter((p) => p.active).length}
+              </span>
+            ) : null}
+          </button>
+        </div>
+      )}
+
+      {merchantTab === 'vitrine' && activeMerchant && onSaveStorefront ? (
+        <MerchantVitrineTab
+          merchant={activeMerchant}
+          onSaveStorefront={onSaveStorefront}
+          onPreviewStorefront={onPreviewStorefront}
+        />
+      ) : (
+        <>
+          {/* Atalhos Intuitivos: Quero enviar um item vs Quero receber um item */}
+          <section aria-label="Ações rápidas do solicitante" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <button
           type="button"
           onClick={() => applyFlowDirectionSwitch('enviar', true)}
@@ -2101,6 +2177,58 @@ export function MerchantPanel({
                         </p>
                       )}
 
+                      {order.storefrontOrder && (
+                        <div className="mt-2 rounded-xl border border-emerald-200 bg-emerald-50/60 p-3 space-y-2 text-xs">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="inline-flex items-center gap-1.5 font-bold text-emerald-950">
+                              <ShoppingBag
+                                className="h-3.5 w-3.5 text-emerald-700"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                Pedido da Vitrine · Cliente:{' '}
+                                {order.storefrontOrder.customerName}
+                                {order.storefrontOrder.customerPhone
+                                  ? ` (${order.storefrontOrder.customerPhone})`
+                                  : ''}
+                              </span>
+                            </span>
+                            <span className="font-mono font-bold text-emerald-900 tabular-nums">
+                              Total c/ frete:{' '}
+                              {formatBRL(order.storefrontOrder.grandTotal)}
+                            </span>
+                          </div>
+                          <ul className="space-y-1 text-zinc-700">
+                            {order.storefrontOrder.items.map((item) => (
+                              <li
+                                key={`${order.id}-${item.productId}-${item.name}`}
+                                className="flex items-center justify-between gap-2"
+                              >
+                                <span>
+                                  <strong className="font-mono text-zinc-900">
+                                    {item.quantity}x
+                                  </strong>{' '}
+                                  {item.name}
+                                </span>
+                                <span className="font-mono text-zinc-900 tabular-nums">
+                                  {formatBRL(item.lineTotal)}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="border-t border-emerald-200/80 pt-1.5 text-[11px] text-emerald-950 flex flex-wrap gap-x-3 gap-y-0.5 font-mono tabular-nums">
+                            <span>
+                              Produtos:{' '}
+                              {formatBRL(order.storefrontOrder.productsSubtotal)}
+                            </span>
+                            <span>
+                              Frete RotaJusta:{' '}
+                              {formatBRL(order.storefrontOrder.freightTotal)}
+                            </span>
+                          </p>
+                        </div>
+                      )}
+
                       {order.assignedCourierName && (
                         <div className="flex flex-wrap items-center gap-2 pt-0.5 text-xs text-zinc-600">
                           <span>
@@ -2938,6 +3066,8 @@ export function MerchantPanel({
             </div>
           </div>
         </div>
+      )}
+        </>
       )}
     </div>
   );

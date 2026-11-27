@@ -17,6 +17,7 @@ import {
   Route,
   Search,
   ShieldCheck,
+  ShoppingBag,
   Volume2,
   VolumeX,
 } from 'lucide-react';
@@ -29,7 +30,7 @@ import {
 import { CourierQuickNotice, Order, Profile } from '../types';
 import { formatVehicleModelAndColor } from '../utils/courierIdentity';
 import { formatPickupCode } from '../utils/pickupCode';
-import { formatDateTimeBR } from '../utils/pricing';
+import { formatBRL, formatDateTimeBR } from '../utils/pricing';
 import {
   buildMerchantShareWhatsAppMessage,
   buildTrackingUrl,
@@ -644,6 +645,58 @@ export function PublicTrackingPage({
                       <VehiclePlateBadge plate={order.assignedCourierPlate} />
                     )}
                   </div>
+                </div>
+              )}
+
+              {/* Itens do Pedido da Vitrine */}
+              {order.storefrontOrder && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-2.5 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-bold text-emerald-950">
+                      <ShoppingBag
+                        className="h-4 w-4 text-emerald-700"
+                        aria-hidden="true"
+                      />
+                      <span>
+                        Itens do Pedido ({order.code})
+                        {order.storefrontOrder.customerName
+                          ? ` · ${order.storefrontOrder.customerName}`
+                          : ''}
+                      </span>
+                    </span>
+                    <span className="font-mono font-bold text-emerald-900 tabular-nums">
+                      Total c/ frete:{' '}
+                      {formatBRL(order.storefrontOrder.grandTotal)}
+                    </span>
+                  </div>
+                  <ul className="space-y-1 text-zinc-700">
+                    {order.storefrontOrder.items.map((item) => (
+                      <li
+                        key={`${order.id}-track-${item.productId}-${item.name}`}
+                        className="flex items-center justify-between gap-2"
+                      >
+                        <span>
+                          <strong className="font-mono text-zinc-900">
+                            {item.quantity}x
+                          </strong>{' '}
+                          {item.name}
+                        </span>
+                        <span className="font-mono text-zinc-900 tabular-nums">
+                          {formatBRL(item.lineTotal)}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="border-t border-emerald-200/80 pt-1.5 text-[11px] text-emerald-950 flex flex-wrap gap-x-4 gap-y-0.5 font-mono tabular-nums">
+                    <span>
+                      Produtos:{' '}
+                      {formatBRL(order.storefrontOrder.productsSubtotal)}
+                    </span>
+                    <span>
+                      Frete RotaJusta:{' '}
+                      {formatBRL(order.storefrontOrder.freightTotal)}
+                    </span>
+                  </p>
                 </div>
               )}
 

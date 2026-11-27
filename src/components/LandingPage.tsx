@@ -273,7 +273,7 @@ export function LandingPage({
                         Mobilidade Limpa
                       </p>
                       <p className="mt-0.5 text-sm font-semibold text-emerald-400">
-                        Taxa R$ 0,00 Bike e EV
+                        -50% na taxa (Bikes e EVs)
                       </p>
                     </div>
                   </div>
@@ -437,10 +437,10 @@ export function LandingPage({
               </div>
               <div className="space-y-1">
                 <p className="font-display text-lg font-bold text-emerald-400 tabular-nums">
-                  -50% na Taxa EV
+                  -50% na Taxa Bike &amp; EV
                 </p>
                 <p className="text-xs text-zinc-400">
-                  Desconto automático de 50% na taxa para bikes e veículos elétricos em Porto Alegre.
+                  50% de desconto na taxa operacional para bikes e veículos elétricos (EVs) em Porto Alegre.
                 </p>
               </div>
             </div>
@@ -638,11 +638,10 @@ export function LandingPage({
                       />
                       <span>
                         <strong className="text-emerald-300">
-                          Incentivo especial para motos e carros elétricos (e
-                          E-Bikes / bicicletas):
+                          Incentivo para bikes e veículos elétricos (EVs):
                         </strong>{' '}
-                        desconto automático de 50% na taxa da plataforma sobre a
-                        categoria a combustão.
+                        50% de desconto na taxa operacional para bikes e veículos
+                        elétricos em relação à categoria a combustão.
                       </span>
                     </li>
                   </ul>

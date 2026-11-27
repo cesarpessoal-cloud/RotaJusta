@@ -18,6 +18,7 @@ import {
   Package,
   QrCode,
   ShieldCheck,
+  ShoppingBag,
   Trash2,
   Truck,
   User,
@@ -895,6 +896,20 @@ export function CourierBoard({
                                 ? 'Com ajudante (+R$ 40,00)'
                                 : 'Sem ajudante'}{' '}
                               · Acesso: {order.freightDetails.accessNote}
+                            </p>
+                          )}
+                          {order.storefrontOrder && (
+                            <p className="inline-flex flex-wrap items-center gap-1.5 rounded-lg border border-emerald-200 bg-emerald-50/70 px-2.5 py-1 text-xs text-emerald-950">
+                              <ShoppingBag
+                                className="h-3.5 w-3.5 text-emerald-700 shrink-0"
+                                aria-hidden="true"
+                              />
+                              <span className="font-semibold">Pedido da Vitrine:</span>
+                              <span>
+                                {order.storefrontOrder.items
+                                  .map((it) => `${it.quantity}x ${it.name}`)
+                                  .join(', ')}
+                              </span>
                             </p>
                           )}
                         </div>
@@ -1892,6 +1907,18 @@ export function CourierBoard({
                             {order.flowDirection === 'receber' && (
                               <p className="text-[11px] font-medium text-sky-800">
                                 Retirada em terceiros · Entrega ao solicitante
+                              </p>
+                            )}
+                            {order.storefrontOrder && (
+                              <p className="text-[11px] font-medium text-emerald-800">
+                                <ShoppingBag
+                                  className="inline h-3 w-3 mr-1 text-emerald-700"
+                                  aria-hidden="true"
+                                />
+                                Itens da Vitrine:{' '}
+                                {order.storefrontOrder.items
+                                  .map((it) => `${it.quantity}x ${it.name}`)
+                                  .join(', ')}
                               </p>
                             )}
                           </div>

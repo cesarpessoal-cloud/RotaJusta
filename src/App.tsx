@@ -19,6 +19,7 @@ import { LegalDocTab, LegalModal } from './components/LegalModal';
 import { MerchantPanel } from './components/MerchantPanel';
 import { MyAccountModal } from './components/MyAccountModal';
 import { OfflineIndicator } from './components/OfflineIndicator';
+import { PublicStorefrontPage } from './components/PublicStorefrontPage';
 import { PublicTrackingPage } from './components/PublicTrackingPage';
 import { isSupabaseConfigured, supabase } from './lib/supabase';
 import {
@@ -41,6 +42,7 @@ import {
   fetchPublicProfilesDirectory,
   fetchWaitingDeliveries,
   mapDbStatusToApproval,
+  saveMerchantStorefrontInSupabase,
   seedInitialSupabaseData,
   submitRatingInSupabase,
   updateBikeMaxRadiusInSupabase,
@@ -54,6 +56,7 @@ import {
   ApprovalStatus,
   CourierQuickNotice,
   CourierQuickNoticeType,
+  MerchantStorefrontConfig,
   Order,
   Profile,
   Rating,
@@ -87,14 +90,33 @@ function getInitialTrackingCodeFromUrl(): string {
   return (params.get('rastreio') || params.get('pedido') || '').trim();
 }
 
+function getInitialStorefrontIdFromUrl(): string {
+  if (typeof window === 'undefined') return '';
+  const params = new URLSearchParams(window.location.search);
+  return (params.get('loja') || params.get('vitrine') || '').trim();
+}
+
 export default function App() {
   const initialTrackingCode = useMemo(() => getInitialTrackingCodeFromUrl(), []);
+  const initialStorefrontId = useMemo(() => getInitialStorefrontIdFromUrl(), []);
   const [currentUser, setCurrentUser] = useState<Profile | null>(null);
-  const [unauthView, setUnauthView] = useState<'landing' | 'auth' | 'tracking'>(
-    () => (initialTrackingCode ? 'tracking' : 'landing')
+  const [unauthView, setUnauthView] = useState<
+    'landing' | 'auth' | 'tracking' | 'storefront'
+  >(() =>
+    initialStorefrontId
+      ? 'storefront'
+      : initialTrackingCode
+      ? 'tracking'
+      : 'landing'
   );
   const [trackingCodeQuery, setTrackingCodeQuery] =
     useState<string>(initialTrackingCode);
+  const [storefrontMerchantId, setStorefrontMerchantId] =
+    useState<string>(initialStorefrontId);
+  const [previewStorefrontMerchantId, setPreviewStorefrontMerchantId] =
+    useState<string | null>(null);
+  const [previewTrackingCode, setPreviewTrackingCode] =
+    useState<string | null>(null);
   const [authInitialTab, setAuthInitialTab] = useState<AuthTab>('entrar');
   const [authInitialRegChoice, setAuthInitialRegChoice] =
     useState<RegProfileChoice>('pf_solicitante');
@@ -680,6 +702,8 @@ export default function App() {
     setCurrentUser(null);
     setUnauthView('landing');
     setAdminView('admin');
+    setPreviewStorefrontMerchantId(null);
+    setPreviewTrackingCode(null);
     setIsAccountModalOpen(false);
     setProfiles([]);
     setApprovedCouriers([]);
@@ -719,6 +743,34 @@ export default function App() {
     setTrackingCodeQuery('');
     setUnauthView('landing');
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleBackToLandingFromStorefront = () => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('loja');
+      url.searchParams.delete('vitrine');
+      window.history.replaceState({}, '', url.toString());
+    }
+    setStorefrontMerchantId('');
+    setUnauthView('landing');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleSaveStorefront = async (params: {
+    profileId: string;
+    storefront: MerchantStorefrontConfig;
+    storePixKey?: string;
+  }): Promise<Profile> => {
+    const updated = await saveMerchantStorefrontInSupabase(params);
+    setProfiles((prev) =>
+      prev.map((p) => (p.id === updated.id ? updated : p))
+    );
+    if (currentUser?.id === updated.id) {
+      setCurrentUser(updated);
+    }
+    showToast('Vitrine e produtos salvos no Supabase!');
+    return updated;
   };
 
   const handleAccountUpdated = (updated: Profile, message: string) => {
@@ -1427,11 +1479,17 @@ export default function App() {
     }
   };
 
-  // Show Landing Page, Public Tracking Page, or Login / Signup gate when no user is logged into the session
+  // Show Landing Page, Public Storefront, Public Tracking Page, or Login / Signup gate when no user is logged into the session
   if (!currentUser) {
     return (
       <>
-        {unauthView === 'tracking' ? (
+        {unauthView === 'storefront' && storefrontMerchantId ? (
+          <PublicStorefrontPage
+            merchantId={storefrontMerchantId}
+            onBackToRotaJusta={handleBackToLandingFromStorefront}
+            onOpenTracking={(code) => handleOpenTracking(code)}
+          />
+        ) : unauthView === 'tracking' ? (
           <PublicTrackingPage
             initialCode={trackingCodeQuery}
             onBackToLanding={handleBackToLandingFromTracking}
@@ -1489,6 +1547,43 @@ export default function App() {
             </button>
           </div>
         )}
+      </>
+    );
+  }
+
+  if (previewTrackingCode) {
+    return (
+      <>
+        <PublicTrackingPage
+          initialCode={previewTrackingCode}
+          onBackToLanding={() => setPreviewTrackingCode(null)}
+          onOpenLogin={() => setPreviewTrackingCode(null)}
+        />
+        <OfflineIndicator />
+      </>
+    );
+  }
+
+  if (previewStorefrontMerchantId) {
+    return (
+      <>
+        <PublicStorefrontPage
+          merchantId={previewStorefrontMerchantId}
+          backButtonLabel="Voltar ao Painel do Lojista"
+          onBackToRotaJusta={() => setPreviewStorefrontMerchantId(null)}
+          onOpenTracking={(code) => {
+            setPreviewStorefrontMerchantId(null);
+            setPreviewTrackingCode(code);
+          }}
+          onOrderCreated={(createdOrder) => {
+            setOrders((prev) =>
+              prev.some((o) => o.id === createdOrder.id)
+                ? prev
+                : [createdOrder, ...prev]
+            );
+          }}
+        />
+        <OfflineIndicator />
       </>
     );
   }
@@ -1719,6 +1814,8 @@ export default function App() {
                 onCreateOrder={handleCreateOrder}
                 onConfirmPixPayment={handleConfirmMerchantPixPayment}
                 onSubmitRating={handleSubmitRating}
+                onSaveStorefront={handleSaveStorefront}
+                onPreviewStorefront={(id) => setPreviewStorefrontMerchantId(id)}
                 formRef={merchantFormRef}
               />
             )}
@@ -1787,6 +1884,8 @@ export default function App() {
                 onCreateOrder={handleCreateOrder}
                 onConfirmPixPayment={handleConfirmMerchantPixPayment}
                 onSubmitRating={handleSubmitRating}
+                onSaveStorefront={handleSaveStorefront}
+                onPreviewStorefront={(id) => setPreviewStorefrontMerchantId(id)}
                 formRef={merchantFormRef}
               />
             )}
