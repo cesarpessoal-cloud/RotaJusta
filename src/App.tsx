@@ -13,7 +13,11 @@ import {
 import { AdminPanel } from './components/AdminPanel';
 import { AuthScreen, AuthTab, RegProfileChoice } from './components/AuthScreen';
 import { CourierBoard } from './components/CourierBoard';
-import { AdminSupervisionView, Header } from './components/Header';
+import {
+  AdminSupervisionView,
+  Header,
+  MerchantWorkspaceTab,
+} from './components/Header';
 import { LandingPage } from './components/LandingPage';
 import { LegalDocTab, LegalModal } from './components/LegalModal';
 import { MerchantPanel } from './components/MerchantPanel';
@@ -31,6 +35,7 @@ import {
   completeDeliveryInSupabase,
   confirmDeliveryStopInSupabase,
   createDeliveryInSupabase,
+  deleteStoreProductInSupabase,
   fetchAllDeliveries,
   fetchAllProfiles,
   fetchAllRatingsInSupabase,
@@ -45,12 +50,15 @@ import {
   saveMerchantStorefrontInSupabase,
   seedInitialSupabaseData,
   submitRatingInSupabase,
+  toggleStoreProductActiveInSupabase,
   updateBikeMaxRadiusInSupabase,
   updateCourierOnlineStatusInSupabase,
   updateDeliveryPaymentStatusInSupabase,
   updateDeliveryQuickNoticeInSupabase,
   updatePixKeyInSupabase,
   updateProfileStatusInSupabase,
+  upgradeWaitingOrderVehicleInSupabase,
+  upsertStoreProductInSupabase,
 } from './lib/supabaseService';
 import {
   ApprovalStatus,
@@ -60,11 +68,14 @@ import {
   Order,
   Profile,
   Rating,
+  StoreProduct,
+  VehicleType,
 } from './types';
 import { formatVehicleModelAndColor } from './utils/courierIdentity';
 import {
   formatBRL,
   formatDateTimeBR,
+  formatVehicleModalDisplayName,
   getCourierSettlementForOrder,
 } from './utils/pricing';
 import {
@@ -82,7 +93,10 @@ import {
   showBrowserDeliveryNotification,
   unlockAudioEngine,
 } from './utils/soundAlert';
-import { isOrderCompatibleWithVehicle } from './utils/vehicleCompatibility';
+import {
+  isOrderCompatibleWithVehicle,
+  normalizeCourierVehicleCategory,
+} from './utils/vehicleCompatibility';
 
 function getInitialTrackingCodeFromUrl(): string {
   if (typeof window === 'undefined') return '';
@@ -113,6 +127,8 @@ export default function App() {
     useState<string>(initialTrackingCode);
   const [storefrontMerchantId, setStorefrontMerchantId] =
     useState<string>(initialStorefrontId);
+  const [storefrontInitialProductId, setStorefrontInitialProductId] =
+    useState<string | null>(null);
   const [previewStorefrontMerchantId, setPreviewStorefrontMerchantId] =
     useState<string | null>(null);
   const [previewTrackingCode, setPreviewTrackingCode] =
@@ -125,6 +141,8 @@ export default function App() {
   const [isLoadingOnlineCount, setIsLoadingOnlineCount] =
     useState<boolean>(true);
   const [adminView, setAdminView] = useState<AdminSupervisionView>('admin');
+  const [merchantWorkspaceTab, setMerchantWorkspaceTab] =
+    useState<MerchantWorkspaceTab>('entregas');
 
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [approvedCouriers, setApprovedCouriers] = useState<Profile[]>([]);
@@ -501,20 +519,77 @@ export default function App() {
       )
       .on(
         'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'profiles' },
+        { event: '*', schema: 'public', table: 'profiles' },
         (payload) => {
-          const row = payload.new as {
+          const eventType = payload.eventType;
+          const row = (payload.new || payload.old) as {
             id?: string;
+            role?: string | null;
             is_online?: boolean | null;
             status?: string;
+            vehicle_type?: string | null;
             max_radius_km?: number | null;
           } | null;
           if (!row?.id) return;
+
+          if (eventType === 'INSERT' || eventType === 'DELETE') {
+            const activeUser = currentUserRef.current;
+            if (activeUser?.role === 'lojista') {
+              void fetchPublicProfilesDirectory()
+                .then((dir) => {
+                  setProfiles(dir);
+                  setApprovedCouriers(
+                    dir.filter(
+                      (p) =>
+                        (p.role === 'entregador' || p.role === 'motorista') &&
+                        p.approvalStatus === 'Aprovado'
+                    )
+                  );
+                })
+                .catch(() => {});
+            } else if (activeUser?.role === 'admin') {
+              void fetchAllProfiles()
+                .then((all) => {
+                  setProfiles(all);
+                  setApprovedCouriers(
+                    all.filter(
+                      (p) =>
+                        (p.role === 'entregador' || p.role === 'motorista') &&
+                        p.approvalStatus === 'Aprovado'
+                    )
+                  );
+                })
+                .catch(() => {});
+            }
+            return;
+          }
 
           const nextOnline = Boolean(row.is_online);
           const nextApproval = row.status
             ? mapDbStatusToApproval(row.status)
             : undefined;
+          const nextVehicleType =
+            row.vehicle_type !== undefined
+              ? normalizeCourierVehicleCategory(row.vehicle_type, row.role)
+              : undefined;
+
+          const existsInProfiles = profilesRef.current.some(
+            (p) => p.id === row.id
+          );
+          if (!existsInProfiles && currentUserRef.current?.role === 'lojista') {
+            void fetchPublicProfilesDirectory()
+              .then((dir) => {
+                setProfiles(dir);
+                setApprovedCouriers(
+                  dir.filter(
+                    (p) =>
+                      (p.role === 'entregador' || p.role === 'motorista') &&
+                      p.approvalStatus === 'Aprovado'
+                  )
+                );
+              })
+              .catch(() => {});
+          }
 
           setProfiles((prev) =>
             prev.map((p) =>
@@ -523,6 +598,7 @@ export default function App() {
                     ...p,
                     isOnline: nextOnline,
                     ...(nextApproval ? { approvalStatus: nextApproval } : {}),
+                    ...(nextVehicleType ? { vehicleType: nextVehicleType } : {}),
                     ...(row.max_radius_km !== undefined
                       ? { bikeMaxRadiusKm: row.max_radius_km }
                       : {}),
@@ -538,6 +614,7 @@ export default function App() {
                     ...c,
                     isOnline: nextOnline,
                     ...(nextApproval ? { approvalStatus: nextApproval } : {}),
+                    ...(nextVehicleType ? { vehicleType: nextVehicleType } : {}),
                     ...(row.max_radius_km !== undefined
                       ? { bikeMaxRadiusKm: row.max_radius_km }
                       : {}),
@@ -553,6 +630,7 @@ export default function App() {
                     ...prev,
                     isOnline: nextOnline,
                     ...(nextApproval ? { approvalStatus: nextApproval } : {}),
+                    ...(nextVehicleType ? { vehicleType: nextVehicleType } : {}),
                   }
                 : prev
             );
@@ -702,6 +780,7 @@ export default function App() {
     setCurrentUser(null);
     setUnauthView('landing');
     setAdminView('admin');
+    setMerchantWorkspaceTab('entregas');
     setPreviewStorefrontMerchantId(null);
     setPreviewTrackingCode(null);
     setIsAccountModalOpen(false);
@@ -753,7 +832,20 @@ export default function App() {
       window.history.replaceState({}, '', url.toString());
     }
     setStorefrontMerchantId('');
+    setStorefrontInitialProductId(null);
     setUnauthView('landing');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleOpenStorefront = (merchantId: string, productId?: string) => {
+    if (typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      url.searchParams.set('loja', merchantId);
+      window.history.replaceState({}, '', url.toString());
+    }
+    setStorefrontMerchantId(merchantId);
+    setStorefrontInitialProductId(productId || null);
+    setUnauthView('storefront');
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -771,6 +863,89 @@ export default function App() {
     }
     showToast('Vitrine e produtos salvos no Supabase!');
     return updated;
+  };
+
+  const applyStoreProductsState = (
+    profileId: string,
+    updater: (prevProducts: StoreProduct[]) => StoreProduct[],
+    updatedMeta?: MerchantStorefrontConfig,
+    updatedPixKey?: string
+  ) => {
+    const patchProfile = (p: Profile): Profile => {
+      if (p.id !== profileId) return p;
+      const baseSf = updatedMeta || p.storefront || { products: [] };
+      const nextProducts = updater(p.storefront?.products || []);
+      return {
+        ...p,
+        ...(updatedPixKey !== undefined
+          ? { pixKey: updatedPixKey || undefined }
+          : {}),
+        storefront: {
+          ...baseSf,
+          products: nextProducts,
+        },
+      };
+    };
+    setProfiles((prev) => prev.map(patchProfile));
+    setCurrentUser((prev) => (prev ? patchProfile(prev) : prev));
+  };
+
+  const handleUpsertStoreProduct = async (params: {
+    profileId: string;
+    product: StoreProduct;
+    storefrontMeta?: MerchantStorefrontConfig;
+    storePixKey?: string;
+  }): Promise<StoreProduct> => {
+    if (params.storefrontMeta) {
+      await saveMerchantStorefrontInSupabase({
+        profileId: params.profileId,
+        storefront: { ...params.storefrontMeta, products: [] },
+        storePixKey: params.storePixKey,
+      });
+    }
+    const saved = await upsertStoreProductInSupabase({
+      profileId: params.profileId,
+      product: params.product,
+    });
+    applyStoreProductsState(
+      params.profileId,
+      (prev) =>
+        prev.some((p) => p.id === saved.id)
+          ? prev.map((p) => (p.id === saved.id ? saved : p))
+          : [saved, ...prev],
+      params.storefrontMeta,
+      params.storePixKey
+    );
+    showToast(`Produto "${saved.name}" salvo na tabela products do Supabase!`);
+    return saved;
+  };
+
+  const handleToggleStoreProductActive = async (params: {
+    profileId: string;
+    productId: string;
+    isActive: boolean;
+  }): Promise<StoreProduct> => {
+    const updated = await toggleStoreProductActiveInSupabase(params);
+    applyStoreProductsState(params.profileId, (prev) =>
+      prev.map((p) => (p.id === updated.id ? updated : p))
+    );
+    showToast(
+      updated.active
+        ? `Produto "${updated.name}" ativado na vitrine!`
+        : `Produto "${updated.name}" pausado na vitrine.`
+    );
+    return updated;
+  };
+
+  const handleDeleteStoreProduct = async (params: {
+    profileId: string;
+    productId: string;
+  }): Promise<void> => {
+    await deleteStoreProductInSupabase(params);
+    applyStoreProductsState(params.profileId, (prev) =>
+      prev.filter((p) => p.id !== params.productId)
+    );
+    showToast('Produto removido da tabela products.');
   };
 
   const handleAccountUpdated = (updated: Profile, message: string) => {
@@ -942,6 +1117,39 @@ export default function App() {
         err instanceof Error ? err.message : 'Erro ao publicar pedido no Supabase.';
       showToast(`Erro Supabase: ${msg}`);
       return { order: null, errorMessage: msg };
+    }
+  };
+
+  const handleUpgradeWaitingOrderVehicle = async (
+    orderId: string,
+    nextVehicle: VehicleType
+  ) => {
+    const targetOrder = orders.find((o) => o.id === orderId);
+    if (!targetOrder || targetOrder.status !== 'Aguardando') return;
+    const knownProfiles = profiles.length > 0 ? profiles : approvedCouriers;
+    try {
+      const updatedOrder = await upgradeWaitingOrderVehicleInSupabase({
+        order: targetOrder,
+        nextVehicle,
+        profilesList: knownProfiles,
+      });
+      setOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? updatedOrder : o))
+      );
+      setWaitingOrders((prev) =>
+        prev.map((o) => (o.id === orderId ? updatedOrder : o))
+      );
+      showToast(
+        `Pedido ${updatedOrder.code} ampliado para ${formatVehicleModalDisplayName(
+          nextVehicle
+        )} (${formatBRL(updatedOrder.grossTotal)}) sem cancelar a corrida!`
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Erro ao ampliar categoria do pedido no Supabase.';
+      showToast(`Erro Supabase: ${msg}`);
     }
   };
 
@@ -1486,6 +1694,7 @@ export default function App() {
         {unauthView === 'storefront' && storefrontMerchantId ? (
           <PublicStorefrontPage
             merchantId={storefrontMerchantId}
+            initialProductId={storefrontInitialProductId}
             onBackToRotaJusta={handleBackToLandingFromStorefront}
             onOpenTracking={(code) => handleOpenTracking(code)}
           />
@@ -1506,6 +1715,7 @@ export default function App() {
             onOpenLogin={handleOpenLogin}
             onOpenRegister={handleOpenRegister}
             onOpenTracking={handleOpenTracking}
+            onOpenStorefront={handleOpenStorefront}
             onSeedTestData={handleSeedTestData}
           />
         ) : (
@@ -1596,12 +1806,23 @@ export default function App() {
   const isCourierViewport =
     isApprovedCourier || (isAdmin && adminView === 'entregador');
 
+  const activeMerchantStoreProductsCount = useMemo(() => {
+    const target =
+      currentUser.role === 'lojista'
+        ? currentUser
+        : merchants.find((m) => m.id === activeMerchantId) || merchants[0];
+    return target?.storefront?.products.filter((p) => p.active).length || 0;
+  }, [currentUser, merchants, activeMerchantId]);
+
   return (
     <div className="min-h-screen flex flex-col bg-zinc-50 text-zinc-900">
       <Header
         currentUser={currentUser}
         adminView={adminView}
         onSelectAdminView={handleSelectAdminView}
+        merchantTab={merchantWorkspaceTab}
+        onSelectMerchantTab={setMerchantWorkspaceTab}
+        activeStoreProductsCount={activeMerchantStoreProductsCount}
         pendingApprovalsCount={pendingApprovalsCount}
         onOpenAccount={() => setIsAccountModalOpen(true)}
         onLogout={handleLogout}
@@ -1813,9 +2034,15 @@ export default function App() {
                 onSelectMerchant={setActiveMerchantId}
                 onCreateOrder={handleCreateOrder}
                 onConfirmPixPayment={handleConfirmMerchantPixPayment}
+                onUpgradeOrderVehicle={handleUpgradeWaitingOrderVehicle}
                 onSubmitRating={handleSubmitRating}
                 onSaveStorefront={handleSaveStorefront}
+                onUpsertStoreProduct={handleUpsertStoreProduct}
+                onToggleStoreProductActive={handleToggleStoreProductActive}
+                onDeleteStoreProduct={handleDeleteStoreProduct}
                 onPreviewStorefront={(id) => setPreviewStorefrontMerchantId(id)}
+                activeTab={merchantWorkspaceTab}
+                onTabChange={setMerchantWorkspaceTab}
                 formRef={merchantFormRef}
               />
             )}
@@ -1883,9 +2110,15 @@ export default function App() {
                 onSelectMerchant={setActiveMerchantId}
                 onCreateOrder={handleCreateOrder}
                 onConfirmPixPayment={handleConfirmMerchantPixPayment}
+                onUpgradeOrderVehicle={handleUpgradeWaitingOrderVehicle}
                 onSubmitRating={handleSubmitRating}
                 onSaveStorefront={handleSaveStorefront}
+                onUpsertStoreProduct={handleUpsertStoreProduct}
+                onToggleStoreProductActive={handleToggleStoreProductActive}
+                onDeleteStoreProduct={handleDeleteStoreProduct}
                 onPreviewStorefront={(id) => setPreviewStorefrontMerchantId(id)}
+                activeTab={merchantWorkspaceTab}
+                onTabChange={setMerchantWorkspaceTab}
                 formRef={merchantFormRef}
               />
             )}

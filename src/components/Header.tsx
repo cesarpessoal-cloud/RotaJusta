@@ -1,14 +1,18 @@
-import { LogOut, Route, Shield, ShieldCheck, UserCog } from 'lucide-react';
+import { LogOut, Route, Send, Shield, ShieldCheck, Store, UserCog } from 'lucide-react';
 import { Profile } from '../types';
 import { PropulsionTag } from './EvBadge';
 import { PWAInstallButton } from './PWAInstallButton';
 
 export type AdminSupervisionView = 'admin' | 'lojista' | 'entregador';
+export type MerchantWorkspaceTab = 'entregas' | 'vitrine';
 
 interface HeaderProps {
   currentUser: Profile;
   adminView: AdminSupervisionView;
   onSelectAdminView: (view: AdminSupervisionView) => void;
+  merchantTab?: MerchantWorkspaceTab;
+  onSelectMerchantTab?: (tab: MerchantWorkspaceTab) => void;
+  activeStoreProductsCount?: number;
   pendingApprovalsCount: number;
   onOpenAccount: () => void;
   onLogout: () => void;
@@ -24,11 +28,15 @@ export function Header({
   currentUser,
   adminView,
   onSelectAdminView,
+  merchantTab = 'entregas',
+  onSelectMerchantTab,
+  activeStoreProductsCount = 0,
   pendingApprovalsCount,
   onOpenAccount,
   onLogout,
 }: HeaderProps) {
   const isAdmin = currentUser.role === 'admin';
+  const isMerchant = currentUser.role === 'lojista';
 
   const roleSummary =
     currentUser.role === 'admin'
@@ -57,7 +65,52 @@ export function Header({
           </div>
         </div>
 
-        {/* Zone 2: Supervision Tabs ONLY for Admin */}
+        {/* Zone 2A: Merchant Top Menu Navigation */}
+        {isMerchant && onSelectMerchantTab && (
+          <nav
+            aria-label="Menu principal da loja"
+            className="hidden md:flex items-center gap-2"
+          >
+            <button
+              type="button"
+              onClick={() => onSelectMerchantTab('entregas')}
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                merchantTab === 'entregas'
+                  ? 'bg-zinc-900 text-white'
+                  : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900'
+              }`}
+            >
+              <Send className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Solicitar Entregas</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onSelectMerchantTab('vitrine')}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 ${
+                merchantTab === 'vitrine'
+                  ? 'border-emerald-700 bg-emerald-600 text-white shadow-xs'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+              }`}
+            >
+              <Store className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Minha Vitrine / Catálogo de Produtos</span>
+              {activeStoreProductsCount > 0 && (
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono text-[11px] font-bold tabular-nums ${
+                    merchantTab === 'vitrine'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-emerald-200/80 text-emerald-950'
+                  }`}
+                >
+                  {activeStoreProductsCount}
+                </span>
+              )}
+            </button>
+          </nav>
+        )}
+
+        {/* Zone 2B: Supervision Tabs ONLY for Admin */}
         {isAdmin && (
           <nav
             aria-label="Supervisão Admin"
@@ -146,6 +199,44 @@ export function Header({
           </button>
         </div>
       </div>
+
+      {/* Mobile navigation bar for Merchant */}
+      {isMerchant && onSelectMerchantTab && (
+        <nav
+          aria-label="Menu principal móvel da loja"
+          className="flex md:hidden items-center gap-2 overflow-x-auto border-t border-zinc-100 px-4 py-2"
+        >
+          <button
+            type="button"
+            onClick={() => onSelectMerchantTab('entregas')}
+            className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              merchantTab === 'entregas'
+                ? 'bg-zinc-900 text-white'
+                : 'bg-zinc-100 text-zinc-700 hover:bg-zinc-200'
+            }`}
+          >
+            <Send className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Solicitar Entregas</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onSelectMerchantTab('vitrine')}
+            className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 ${
+              merchantTab === 'vitrine'
+                ? 'border-emerald-700 bg-emerald-600 text-white'
+                : 'border-emerald-200 bg-emerald-50 text-emerald-900 hover:bg-emerald-100'
+            }`}
+          >
+            <Store className="h-3.5 w-3.5" aria-hidden="true" />
+            <span>Minha Vitrine / Catálogo</span>
+            {activeStoreProductsCount > 0 && (
+              <span className="font-mono text-[11px] font-bold">
+                ({activeStoreProductsCount})
+              </span>
+            )}
+          </button>
+        </nav>
+      )}
 
       {/* Mobile supervision bar ONLY for Admin */}
       {isAdmin && (

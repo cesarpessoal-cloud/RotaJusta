@@ -62,6 +62,7 @@ export interface FreightDetails {
 
 export interface StoreProduct {
   id: string;
+  profileId?: string;
   name: string;
   description: string;
   price: number;

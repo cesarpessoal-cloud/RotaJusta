@@ -50,6 +50,45 @@ export function formatShortVehicleLabel(vehicle: VehicleType): string {
   }
 }
 
+export function normalizeStorefrontVehicle(
+  raw?: string | null
+): VehicleType {
+  const normalized = (raw || '').trim().toLowerCase();
+  if (normalized === 'bike' || normalized.includes('bicicleta')) {
+    return 'Bike';
+  }
+  if (
+    normalized === 'carro' ||
+    normalized.includes('carro') ||
+    normalized.includes('passeio')
+  ) {
+    return 'Carro Pequeno (Passeio)';
+  }
+  if (
+    normalized === 'utilitario' ||
+    normalized.includes('utilitário') ||
+    normalized.includes('utilitario') ||
+    normalized.includes('picape') ||
+    normalized.includes('van') ||
+    normalized.includes('fiorino')
+  ) {
+    return 'Utilitário / Picape / Van';
+  }
+  return 'Moto';
+}
+
+export function isSafeImageUrl(url?: string | null): boolean {
+  if (!url) return false;
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.startsWith('https://') ||
+    trimmed.startsWith('http://') ||
+    trimmed.startsWith('data:image/') ||
+    trimmed.startsWith('/')
+  );
+}
+
 export function getStorefrontVehicleRank(vehicle: VehicleType): number {
   switch (vehicle) {
     case 'Bike':

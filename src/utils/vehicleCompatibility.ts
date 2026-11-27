@@ -1,4 +1,11 @@
-import { Order, OrderType, PropulsionType, VehicleType } from '../types';
+import {
+  Order,
+  OrderType,
+  Profile,
+  PropulsionType,
+  UserRole,
+  VehicleType,
+} from '../types';
 
 export const VEHICLE_CATEGORIES: VehicleType[] = [
   'Bike',
@@ -6,6 +13,154 @@ export const VEHICLE_CATEGORIES: VehicleType[] = [
   'Carro Pequeno (Passeio)',
   'Utilitário / Picape / Van',
 ];
+
+export type OnlineCourierCountsByVehicle = Record<VehicleType, number>;
+
+export function createEmptyOnlineCountsByVehicle(): OnlineCourierCountsByVehicle {
+  return {
+    Bike: 0,
+    Moto: 0,
+    'Carro Pequeno (Passeio)': 0,
+    'Utilitário / Picape / Van': 0,
+  };
+}
+
+export function normalizeCourierVehicleCategory(
+  vehicleType?: string | null,
+  role?: UserRole | string | null
+): VehicleType {
+  if (vehicleType === 'Bike') return 'Bike';
+  if (vehicleType === 'Moto') return 'Moto';
+  if (vehicleType === 'Carro Pequeno (Passeio)') {
+    return 'Carro Pequeno (Passeio)';
+  }
+  if (vehicleType === 'Utilitário / Picape / Van') {
+    return 'Utilitário / Picape / Van';
+  }
+  if (vehicleType === 'Carro/Utilitário') {
+    return role === 'motorista'
+      ? 'Carro Pequeno (Passeio)'
+      : 'Utilitário / Picape / Van';
+  }
+  return role === 'motorista' ? 'Carro Pequeno (Passeio)' : 'Moto';
+}
+
+export function countOnlineCouriersByVehicle(
+  couriers: Profile[]
+): OnlineCourierCountsByVehicle {
+  const counts = createEmptyOnlineCountsByVehicle();
+  for (const courier of couriers) {
+    const isCourierRole =
+      courier.role === 'entregador' || courier.role === 'motorista';
+    if (!isCourierRole) continue;
+    if (courier.approvalStatus !== 'Aprovado') continue;
+    if (!courier.isOnline) continue;
+    const category = normalizeCourierVehicleCategory(
+      courier.vehicleType,
+      courier.role
+    );
+    counts[category] += 1;
+  }
+  return counts;
+}
+
+export function getTotalOnlineCouriersFromMap(
+  counts: OnlineCourierCountsByVehicle
+): number {
+  return VEHICLE_CATEGORIES.reduce((sum, cat) => sum + (counts[cat] || 0), 0);
+}
+
+export function getNextSuperiorVehicle(
+  currentVehicle: VehicleType,
+  allowedVehicles?: VehicleType[]
+): VehicleType | null {
+  const startIdx = VEHICLE_CATEGORIES.indexOf(currentVehicle);
+  if (startIdx < 0) return null;
+  for (let i = startIdx + 1; i < VEHICLE_CATEGORIES.length; i += 1) {
+    const candidate = VEHICLE_CATEGORIES[i];
+    if (!allowedVehicles || allowedVehicles.includes(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export function getNextAvailableSuperiorVehicle(
+  currentVehicle: VehicleType,
+  onlineCounts: OnlineCourierCountsByVehicle,
+  allowedVehicles?: VehicleType[]
+): VehicleType | null {
+  const startIdx = VEHICLE_CATEGORIES.indexOf(currentVehicle);
+  if (startIdx < 0) return null;
+  for (let i = startIdx + 1; i < VEHICLE_CATEGORIES.length; i += 1) {
+    const candidate = VEHICLE_CATEGORIES[i];
+    if (allowedVehicles && !allowedVehicles.includes(candidate)) continue;
+    if ((onlineCounts[candidate] || 0) > 0) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export function resolveVehicleWithOnlineFallback(params: {
+  preferredVehicle: VehicleType;
+  onlineCounts: OnlineCourierCountsByVehicle;
+  allowedVehicles?: VehicleType[];
+}): {
+  selectedVehicle: VehicleType;
+  wasPreferredUnavailable: boolean;
+  hasAnyAvailableInAllowed: boolean;
+  totalOnlineAll: number;
+} {
+  const allowed =
+    params.allowedVehicles && params.allowedVehicles.length > 0
+      ? params.allowedVehicles
+      : VEHICLE_CATEGORIES;
+  const totalOnlineAll = getTotalOnlineCouriersFromMap(params.onlineCounts);
+  const preferred = allowed.includes(params.preferredVehicle)
+    ? params.preferredVehicle
+    : allowed[0];
+
+  if ((params.onlineCounts[preferred] || 0) > 0) {
+    return {
+      selectedVehicle: preferred,
+      wasPreferredUnavailable: false,
+      hasAnyAvailableInAllowed: true,
+      totalOnlineAll,
+    };
+  }
+
+  const nextSuperior = getNextAvailableSuperiorVehicle(
+    preferred,
+    params.onlineCounts,
+    allowed
+  );
+  if (nextSuperior) {
+    return {
+      selectedVehicle: nextSuperior,
+      wasPreferredUnavailable: true,
+      hasAnyAvailableInAllowed: true,
+      totalOnlineAll,
+    };
+  }
+
+  const anyAvailable = allowed.find((v) => (params.onlineCounts[v] || 0) > 0);
+  if (anyAvailable) {
+    return {
+      selectedVehicle: anyAvailable,
+      wasPreferredUnavailable: true,
+      hasAnyAvailableInAllowed: true,
+      totalOnlineAll,
+    };
+  }
+
+  return {
+    selectedVehicle: preferred,
+    wasPreferredUnavailable: true,
+    hasAnyAvailableInAllowed: false,
+    totalOnlineAll,
+  };
+}
 
 export function getPropulsionOptionsForVehicle(
   vehicleType?: VehicleType
@@ -70,6 +225,12 @@ export function isOrderCompatibleWithVehicle(
     return false;
   }
   if (orderType === 'frete') {
+    return vehicleType === 'Utilitário / Picape / Van';
+  }
+  if (
+    orderType === 'rapida' &&
+    requestedVehicle === 'Utilitário / Picape / Van'
+  ) {
     return vehicleType === 'Utilitário / Picape / Van';
   }
   if (!getAllowedOrderTypesForVehicle(vehicleType).includes(orderType)) {

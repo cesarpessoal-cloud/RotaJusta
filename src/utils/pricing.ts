@@ -103,7 +103,12 @@ export function getCompatibleVehiclesForOrderType(
 ): VehicleType[] {
   switch (type) {
     case 'rapida':
-      return ['Bike', 'Moto', 'Carro Pequeno (Passeio)'];
+      return [
+        'Bike',
+        'Moto',
+        'Carro Pequeno (Passeio)',
+        'Utilitário / Picape / Van',
+      ];
     case 'rota':
       return ['Moto', 'Carro Pequeno (Passeio)', 'Utilitário / Picape / Van'];
     case 'frete':

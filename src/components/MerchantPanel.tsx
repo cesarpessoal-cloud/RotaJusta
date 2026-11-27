@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowRightLeft,
+  ArrowUpRight,
   BellRing,
   Bike,
   CalendarClock,
@@ -55,6 +57,7 @@ import {
   PixPaymentMethod,
   Profile,
   Rating,
+  StoreProduct,
   VehicleType,
 } from '../types';
 import { formatVehicleModelAndColor } from '../utils/courierIdentity';
@@ -89,12 +92,13 @@ import {
   getTomorrowDateInputValue,
 } from '../utils/schedule';
 import {
-  EvBadge,
-  FreightBadge,
-  OrderStatusBadge,
-  PaymentStatusBadge,
-  PropulsionTag,
-} from './EvBadge';
+  countOnlineCouriersByVehicle,
+  getNextAvailableSuperiorVehicle,
+  getNextSuperiorVehicle,
+  getTotalOnlineCouriersFromMap,
+  resolveVehicleWithOnlineFallback,
+} from '../utils/vehicleCompatibility';
+import { EvBadge, FreightBadge, OrderStatusBadge, PaymentStatusBadge, PropulsionTag } from './EvBadge';
 import { MapStopPoint, PortoAlegreMap } from './PortoAlegreMap';
 import { PixQrCodeSettlement } from './PixQrCodeSettlement';
 import { OrderRatingBox, RatingBadge } from './RatingWidgets';
@@ -115,6 +119,10 @@ interface MerchantPanelProps {
     newOrder: Order
   ) => Promise<{ order: Order | null; errorMessage?: string }>;
   onConfirmPixPayment: (orderId: string) => Promise<void>;
+  onUpgradeOrderVehicle?: (
+    orderId: string,
+    nextVehicle: VehicleType
+  ) => Promise<void>;
   onSubmitRating: (params: {
     deliveryId: string;
     fromProfileId: string;
@@ -127,7 +135,24 @@ interface MerchantPanelProps {
     storefront: MerchantStorefrontConfig;
     storePixKey?: string;
   }) => Promise<Profile>;
+  onUpsertStoreProduct?: (params: {
+    profileId: string;
+    product: StoreProduct;
+    storefrontMeta?: MerchantStorefrontConfig;
+    storePixKey?: string;
+  }) => Promise<StoreProduct>;
+  onToggleStoreProductActive?: (params: {
+    profileId: string;
+    productId: string;
+    isActive: boolean;
+  }) => Promise<StoreProduct>;
+  onDeleteStoreProduct?: (params: {
+    profileId: string;
+    productId: string;
+  }) => Promise<void>;
   onPreviewStorefront?: (merchantId: string) => void;
+  activeTab?: 'entregas' | 'vitrine';
+  onTabChange?: (tab: 'entregas' | 'vitrine') => void;
   formRef?: React.RefObject<HTMLFormElement | null>;
 }
 
@@ -167,9 +192,15 @@ export function MerchantPanel({
   onSelectMerchant,
   onCreateOrder,
   onConfirmPixPayment,
+  onUpgradeOrderVehicle,
   onSubmitRating,
   onSaveStorefront,
+  onUpsertStoreProduct,
+  onToggleStoreProductActive,
+  onDeleteStoreProduct,
   onPreviewStorefront,
+  activeTab,
+  onTabChange,
   formRef,
 }: MerchantPanelProps) {
   const activeMerchant = useMemo(
@@ -182,7 +213,14 @@ export function MerchantPanel({
 
   const evaluatorId = currentEvaluatorId || activeMerchant?.id || '';
 
-  const [merchantTab, setMerchantTab] = useState<'entregas' | 'vitrine'>('entregas');
+  const [internalMerchantTab, setInternalMerchantTab] = useState<
+    'entregas' | 'vitrine'
+  >('entregas');
+  const merchantTab = activeTab ?? internalMerchantTab;
+  const setMerchantTab = (next: 'entregas' | 'vitrine') => {
+    setInternalMerchantTab(next);
+    onTabChange?.(next);
+  };
   const [flowDirection, setFlowDirection] = useState<OrderFlowDirection>(
     initialFlowDirection
   );
@@ -307,6 +345,35 @@ export function MerchantPanel({
     src: string;
     caption: string;
   } | null>(null);
+  const [upgradingOrderId, setUpgradingOrderId] = useState<string | null>(null);
+  const [autoFallbackNotice, setAutoFallbackNotice] = useState<string | null>(
+    null
+  );
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  const hasWaitingOrders = useMemo(
+    () => orders.some((o) => o.status === 'Aguardando'),
+    [orders]
+  );
+
+  useEffect(() => {
+    setNowMs(Date.now());
+    if (!hasWaitingOrders) return;
+    const timer = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 15000);
+    return () => window.clearInterval(timer);
+  }, [hasWaitingOrders]);
+
+  const onlineCountsByVehicle = useMemo(
+    () => countOnlineCouriersByVehicle(onlineCouriers),
+    [onlineCouriers]
+  );
+
+  const totalOnlineAll = useMemo(
+    () => getTotalOnlineCouriersFromMap(onlineCountsByVehicle),
+    [onlineCountsByVehicle]
+  );
 
   const handleCopyPixKey = async (orderId: string, key: string) => {
     try {
@@ -327,12 +394,67 @@ export function MerchantPanel({
     }
   };
 
+  const handleUpgradeOrderVehicleClick = async (
+    orderId: string,
+    nextVehicle: VehicleType
+  ) => {
+    if (!onUpgradeOrderVehicle) return;
+    setUpgradingOrderId(orderId);
+    try {
+      await onUpgradeOrderVehicle(orderId, nextVehicle);
+    } finally {
+      setUpgradingOrderId(null);
+    }
+  };
+
   const effectivePackageCount = orderType === 'rota' ? routeStops.length : 1;
 
   const compatibleVehicles = useMemo(
     () => getCompatibleVehiclesForOrderType(orderType),
     [orderType]
   );
+
+  const hasAnyCompatibleOnline = useMemo(
+    () => compatibleVehicles.some((v) => (onlineCountsByVehicle[v] || 0) > 0),
+    [compatibleVehicles, onlineCountsByVehicle]
+  );
+
+  useEffect(() => {
+    if (!hasAnyCompatibleOnline) {
+      setAutoFallbackNotice(null);
+      if (totalOnlineAll === 0) {
+        setScheduleMode('agendada');
+      }
+      return;
+    }
+
+    if ((onlineCountsByVehicle[requestedVehicle] || 0) === 0) {
+      const resolved = resolveVehicleWithOnlineFallback({
+        preferredVehicle: requestedVehicle,
+        onlineCounts: onlineCountsByVehicle,
+        allowedVehicles: compatibleVehicles,
+      });
+      if (
+        resolved.hasAnyAvailableInAllowed &&
+        resolved.selectedVehicle !== requestedVehicle
+      ) {
+        setAutoFallbackNotice(
+          `Sem entregadores de ${formatVehicleModalDisplayName(
+            requestedVehicle
+          )} online agora — ajustado automaticamente para ${formatVehicleModalDisplayName(
+            resolved.selectedVehicle
+          )} com frete recalculado.`
+        );
+        setRequestedVehicle(resolved.selectedVehicle);
+      }
+    }
+  }, [
+    hasAnyCompatibleOnline,
+    totalOnlineAll,
+    onlineCountsByVehicle,
+    requestedVehicle,
+    compatibleVehicles,
+  ]);
 
   const selectedModalRule = useMemo(
     () => getVehicleModalPricing(requestedVehicle),
@@ -623,7 +745,9 @@ export function MerchantPanel({
   ]);
 
   const showSchedulingSection =
-    orderType === 'rota' || activeMerchant?.personType !== 'PF';
+    !hasAnyCompatibleOnline ||
+    orderType === 'rota' ||
+    activeMerchant?.personType !== 'PF';
 
   const schedulePreviewLabel = useMemo(() => {
     if (!showSchedulingSection) return null;
@@ -895,117 +1019,66 @@ export function MerchantPanel({
   }, [orders]);
 
   return (
-    <div className="space-y-8">
-      {/* Intro / Business Rules Summary Strip */}
-      <section className="flex flex-col gap-4 border-b border-zinc-200 pb-6 lg:flex-row lg:items-end lg:justify-between">
-        <div className="max-w-2xl space-y-1.5">
-          <p className="text-xs font-medium text-emerald-700">
-            Porto Alegre · RS · Logística Urbana com Taxa Fixa
-          </p>
-          <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-zinc-900">
-            Painel do Lojista
-          </h1>
-          <p className="text-sm leading-relaxed text-zinc-600">
-            Solicite entregas rápidas, rotas consolidadas ou{' '}
-            <strong className="font-semibold text-zinc-900">
-              pequenos fretes de utilitário
-            </strong>{' '}
-            com repasse transparente e 50% de desconto na taxa para bicicletas e
-            veículos elétricos.
-          </p>
-          <div className="pt-1 flex flex-wrap items-center gap-2">
-            <span
-              className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
-                onlineCouriers.length > 0
-                  ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-                  : 'border-zinc-200 bg-zinc-100 text-zinc-600'
-              }`}
-            >
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  onlineCouriers.length > 0
-                    ? 'bg-emerald-500 animate-pulse'
-                    : 'bg-zinc-400'
-                }`}
-                aria-hidden="true"
-              />
-              <span>
-                {onlineCouriers.length > 0
-                  ? `${onlineCouriers.length} entregador(es) ONLINE agora em Porto Alegre`
-                  : 'Nenhum entregador online no momento em Porto Alegre'}
-              </span>
-            </span>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-3 gap-4 border border-zinc-200 bg-white px-4 py-3 rounded-xl shrink-0">
-          <div>
-            <p className="text-xs text-zinc-500">Aguardando</p>
-            <p className="font-mono text-lg font-semibold text-zinc-900 tabular-nums">
-              {counts.aguardando}
-            </p>
-          </div>
-          <div className="border-l border-zinc-200 pl-4">
-            <p className="text-xs text-zinc-500">Em Rota</p>
-            <p className="font-mono text-lg font-semibold text-zinc-900 tabular-nums">
-              {counts.emRota}
-            </p>
-          </div>
-          <div className="border-l border-zinc-200 pl-4">
-            <p className="text-xs text-zinc-500">Entregues</p>
-            <p className="font-mono text-lg font-semibold text-emerald-700 tabular-nums">
-              {counts.entregue}
-            </p>
-          </div>
-        </div>
-      </section>
-
+    <div className="space-y-6">
       {activeMerchant && onSaveStorefront && (
         <div
           role="tablist"
-          aria-label="Seções do Painel do Lojista"
-          className="flex flex-wrap items-center gap-2 border-b border-zinc-200 pb-3"
+          aria-label="Menu principal superior da loja"
+          className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-zinc-200 bg-white p-2 shadow-2xs"
         >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={merchantTab === 'entregas'}
-            onClick={() => setMerchantTab('entregas')}
-            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-xs sm:text-sm font-semibold transition-colors ${
-              merchantTab === 'entregas'
-                ? 'border-zinc-900 bg-zinc-900 text-white shadow-xs'
-                : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
-            }`}
-          >
-            <Send className="h-4 w-4" aria-hidden="true" />
-            <span>Solicitar Entregas &amp; Pedidos</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={merchantTab === 'entregas'}
+              onClick={() => setMerchantTab('entregas')}
+              className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs sm:text-sm font-semibold transition-colors ${
+                merchantTab === 'entregas'
+                  ? 'border-zinc-900 bg-zinc-900 text-white shadow-xs'
+                  : 'border-zinc-200 bg-zinc-50 text-zinc-700 hover:bg-zinc-100'
+              }`}
+            >
+              <Send className="h-4 w-4" aria-hidden="true" />
+              <span>Solicitar Entregas &amp; Pedidos</span>
+            </button>
 
-          <button
-            type="button"
-            role="tab"
-            aria-selected={merchantTab === 'vitrine'}
-            onClick={() => setMerchantTab('vitrine')}
-            className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2 text-xs sm:text-sm font-semibold transition-colors ${
-              merchantTab === 'vitrine'
-                ? 'border-emerald-700 bg-emerald-700 text-white shadow-xs'
-                : 'border-emerald-200 bg-emerald-50/70 text-emerald-900 hover:bg-emerald-100/70'
-            }`}
-          >
-            <Store className="h-4 w-4" aria-hidden="true" />
-            <span>Minha Vitrine</span>
-            {activeMerchant.storefront?.products.length ? (
-              <span
-                className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] font-bold tabular-nums ${
-                  merchantTab === 'vitrine'
-                    ? 'bg-white/20 text-white'
-                    : 'bg-emerald-200/80 text-emerald-950'
-                }`}
-              >
-                {activeMerchant.storefront.products.filter((p) => p.active).length}
-              </span>
-            ) : null}
-          </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={merchantTab === 'vitrine'}
+              onClick={() => setMerchantTab('vitrine')}
+              className={`inline-flex items-center gap-2 rounded-xl border px-4 py-2.5 text-xs sm:text-sm font-bold transition-colors ${
+                merchantTab === 'vitrine'
+                  ? 'border-emerald-700 bg-emerald-600 text-white shadow-xs'
+                  : 'border-emerald-300 bg-emerald-50 text-emerald-950 hover:bg-emerald-100'
+              }`}
+            >
+              <Store className="h-4 w-4" aria-hidden="true" />
+              <span>Minha Vitrine / Catálogo de Produtos</span>
+              {activeMerchant.storefront?.products.length ? (
+                <span
+                  className={`rounded-md px-1.5 py-0.5 font-mono text-[11px] font-bold tabular-nums ${
+                    merchantTab === 'vitrine'
+                      ? 'bg-white/20 text-white'
+                      : 'bg-emerald-200 text-emerald-950'
+                  }`}
+                >
+                  {activeMerchant.storefront.products.filter((p) => p.active).length}
+                </span>
+              ) : null}
+            </button>
+          </div>
+
+          {merchantTab === 'entregas' && (
+            <button
+              type="button"
+              onClick={() => setMerchantTab('vitrine')}
+              className="hidden sm:inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-emerald-700 whitespace-nowrap"
+            >
+              <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+              <span>Gerenciar Produtos da Vitrine</span>
+            </button>
+          )}
         </div>
       )}
 
@@ -1013,10 +1086,77 @@ export function MerchantPanel({
         <MerchantVitrineTab
           merchant={activeMerchant}
           onSaveStorefront={onSaveStorefront}
+          onUpsertStoreProduct={onUpsertStoreProduct}
+          onToggleStoreProductActive={onToggleStoreProductActive}
+          onDeleteStoreProduct={onDeleteStoreProduct}
           onPreviewStorefront={onPreviewStorefront}
         />
       ) : (
         <>
+          {/* Intro / Business Rules Summary Strip */}
+          <section className="flex flex-col gap-4 border-b border-zinc-200 pb-6 lg:flex-row lg:items-end lg:justify-between">
+            <div className="max-w-2xl space-y-1.5">
+              <p className="text-xs font-medium text-emerald-700">
+                Porto Alegre · RS · Logística Urbana com Taxa Fixa
+              </p>
+              <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-zinc-900">
+                Painel do Lojista
+              </h1>
+              <p className="text-sm leading-relaxed text-zinc-600">
+                Solicite entregas rápidas, rotas consolidadas ou{' '}
+                <strong className="font-semibold text-zinc-900">
+                  pequenos fretes de utilitário
+                </strong>{' '}
+                com repasse transparente e 50% de desconto na taxa para bicicletas e
+                veículos elétricos.
+              </p>
+              <div className="pt-1 flex flex-wrap items-center gap-2">
+                <span
+                  className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold ${
+                    onlineCouriers.length > 0
+                      ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                      : 'border-zinc-200 bg-zinc-100 text-zinc-600'
+                  }`}
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      onlineCouriers.length > 0
+                        ? 'bg-emerald-500 animate-pulse'
+                        : 'bg-zinc-400'
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span>
+                    {onlineCouriers.length > 0
+                      ? `${onlineCouriers.length} entregador(es) ONLINE agora em Porto Alegre`
+                      : 'Nenhum entregador online no momento em Porto Alegre'}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-3 gap-4 border border-zinc-200 bg-white px-4 py-3 rounded-xl shrink-0">
+              <div>
+                <p className="text-xs text-zinc-500">Aguardando</p>
+                <p className="font-mono text-lg font-semibold text-zinc-900 tabular-nums">
+                  {counts.aguardando}
+                </p>
+              </div>
+              <div className="border-l border-zinc-200 pl-4">
+                <p className="text-xs text-zinc-500">Em Rota</p>
+                <p className="font-mono text-lg font-semibold text-zinc-900 tabular-nums">
+                  {counts.emRota}
+                </p>
+              </div>
+              <div className="border-l border-zinc-200 pl-4">
+                <p className="text-xs text-zinc-500">Entregues</p>
+                <p className="font-mono text-lg font-semibold text-emerald-700 tabular-nums">
+                  {counts.entregue}
+                </p>
+              </div>
+            </div>
+          </section>
+
           {/* Atalhos Intuitivos: Quero enviar um item vs Quero receber um item */}
           <section aria-label="Ações rápidas do solicitante" className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <button
@@ -1202,34 +1342,66 @@ export function MerchantPanel({
             )}
           </div>
 
-          {/* Categoria de Veículo (Precificação Diferenciada por Modal) */}
-          <div className="space-y-2">
+          {/* Categoria de Veículo (Precificação Diferenciada por Modal + Disponibilidade Online) */}
+          <div className="space-y-2.5">
             <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between">
               <span className="block text-xs font-semibold text-zinc-700">
-                Categoria de Veículo (Tarifa e Taxa por Modal)
+                Categoria de Veículo (Tarifa, Taxa e Entregadores Online)
               </span>
               <span className="text-[11px] text-zinc-500">
                 Filtra automaticamente apenas entregadores compatíveis
               </span>
             </div>
+
+            {autoFallbackNotice && (
+              <div className="flex items-start justify-between gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-950">
+                <div className="flex items-start gap-2">
+                  <AlertTriangle
+                    className="h-4 w-4 text-amber-700 shrink-0 mt-0.5"
+                    aria-hidden="true"
+                  />
+                  <span>{autoFallbackNotice}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAutoFallbackNotice(null)}
+                  className="text-[11px] font-semibold text-amber-900 underline shrink-0"
+                >
+                  Ok
+                </button>
+              </div>
+            )}
+
             <div
               className={`grid grid-cols-1 gap-2 ${
                 compatibleVehicles.length === 1
                   ? 'sm:grid-cols-1'
+                  : compatibleVehicles.length === 4
+                  ? 'sm:grid-cols-2'
                   : 'sm:grid-cols-3'
               }`}
             >
               {compatibleVehicles.map((vType) => {
                 const rule = VEHICLE_MODAL_PRICING[vType];
                 const isSelected = requestedVehicle === vType;
+                const onlineInModal = onlineCountsByVehicle[vType] || 0;
+                const isDisabled =
+                  hasAnyCompatibleOnline && onlineInModal === 0;
+
                 return (
                   <button
                     key={vType}
                     type="button"
-                    onClick={() => setRequestedVehicle(vType)}
+                    disabled={isDisabled}
+                    onClick={() => {
+                      setAutoFallbackNotice(null);
+                      setRequestedVehicle(vType);
+                    }}
                     className={`rounded-xl border p-3 text-left transition-colors ${
                       isSelected
                         ? 'border-emerald-600 bg-emerald-50/70 text-emerald-950 shadow-2xs'
+                        : isDisabled
+                        ? 'border-zinc-200 bg-zinc-100/80 text-zinc-400 cursor-not-allowed opacity-75'
                         : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
                     }`}
                   >
@@ -1241,7 +1413,11 @@ export function MerchantPanel({
                         </span>
                       )}
                     </div>
-                    <p className="mt-1 font-mono text-[11px] text-zinc-600 tabular-nums">
+                    <p
+                      className={`mt-1 font-mono text-[11px] tabular-nums ${
+                        isDisabled ? 'text-zinc-400' : 'text-zinc-600'
+                      }`}
+                    >
                       {orderType === 'rota'
                         ? `${formatBRL(rule.rotaPerPackage)}/pacote · Taxa ${formatBRL(
                             rule.rotaInitialPlatformFeePerPackage
@@ -1250,15 +1426,83 @@ export function MerchantPanel({
                             rule.perKmRate
                           )}/km`}
                     </p>
-                    {orderType !== 'rota' && (
-                      <p className="mt-0.5 font-mono text-[11px] text-emerald-800 tabular-nums">
-                        Taxa op. inicial: {formatBRL(rule.initialPlatformFee)}
-                      </p>
-                    )}
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
+                      {orderType !== 'rota' && (
+                        <span
+                          className={`font-mono tabular-nums ${
+                            isDisabled ? 'text-zinc-400' : 'text-emerald-800'
+                          }`}
+                        >
+                          Taxa op. inicial: {formatBRL(rule.initialPlatformFee)}
+                        </span>
+                      )}
+                      <span
+                        className={`font-semibold ${
+                          onlineInModal === 0
+                            ? 'text-amber-700'
+                            : 'text-emerald-700'
+                        }`}
+                      >
+                        {onlineInModal === 0
+                          ? 'Sem entregadores online agora'
+                          : `${onlineInModal} online agora`}
+                      </span>
+                    </div>
                   </button>
                 );
               })}
             </div>
+
+            {!hasAnyCompatibleOnline && (
+              <div className="rounded-xl border-2 border-amber-300 bg-amber-50 p-3.5 space-y-2">
+                <div className="flex items-start gap-2 text-xs text-amber-950">
+                  <CalendarClock
+                    className="h-4 w-4 text-amber-700 shrink-0 mt-0.5"
+                    aria-hidden="true"
+                  />
+                  <div className="space-y-0.5">
+                    <p className="font-bold">
+                      {totalOnlineAll === 0
+                        ? 'Nenhum entregador online em nenhuma categoria — Entrega agendada / Combinar com a loja liberada'
+                        : 'Sem entregadores online nas categorias desta modalidade — use Entrega agendada / Combinar com a loja'}
+                    </p>
+                    <p className="text-[11px] text-amber-900">
+                      Você ainda pode publicar o pedido normalmente em modo agendado
+                      para não perder a venda ou combinar a coleta com sua loja.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setScheduleMode('agendada');
+                    if (
+                      !recipientNote
+                        .toLowerCase()
+                        .includes('entrega agendada / combinar com a loja')
+                    ) {
+                      setRecipientNote((prev) =>
+                        prev.trim()
+                          ? `${prev.trim()} · Entrega agendada / Combinar com a loja`
+                          : 'Entrega agendada / Combinar com a loja'
+                      );
+                    }
+                  }}
+                  className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition-colors ${
+                    scheduleMode === 'agendada'
+                      ? 'border-amber-600 bg-amber-600 text-white'
+                      : 'border-amber-300 bg-white text-amber-900 hover:bg-amber-100'
+                  }`}
+                >
+                  <CalendarClock className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span>
+                    {scheduleMode === 'agendada'
+                      ? '✓ Entrega agendada / Combinar com a loja ativa'
+                      : 'Ativar Entrega agendada / Combinar com a loja'}
+                  </span>
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Visual Flow Direction Context Banner */}
@@ -2573,6 +2817,124 @@ export function MerchantPanel({
                           <ExternalLink className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
                           <span>Abrir Página de Rastreio</span>
                         </a>
+                      </div>
+                    );
+                  })()}
+
+                  {/* Escalonamento Rápido após 3 min aguardando aceite sem entregador */}
+                  {order.status === 'Aguardando' && (() => {
+                    const createdMs = new Date(order.createdAt).getTime();
+                    const elapsedMs = Number.isNaN(createdMs)
+                      ? 0
+                      : Math.max(0, nowMs - createdMs);
+                    if (elapsedMs < 3 * 60 * 1000) return null;
+
+                    const currentVehicle =
+                      order.requestedVehicle ||
+                      getDefaultVehicleForOrderType(order.type);
+                    const allowedForType = getCompatibleVehiclesForOrderType(
+                      order.type
+                    );
+                    const nextAvailableVehicle =
+                      getNextAvailableSuperiorVehicle(
+                        currentVehicle,
+                        onlineCountsByVehicle,
+                        allowedForType
+                      ) ||
+                      getNextSuperiorVehicle(currentVehicle, allowedForType);
+
+                    const waitingMinutes = Math.max(
+                      3,
+                      Math.floor(elapsedMs / 60000)
+                    );
+
+                    if (!nextAvailableVehicle) {
+                      return (
+                        <div className="mt-4 rounded-xl border border-amber-300 bg-amber-50 px-3.5 py-2.5 text-xs text-amber-950 flex items-center gap-2">
+                          <Clock
+                            className="h-4 w-4 text-amber-700 shrink-0"
+                            aria-hidden="true"
+                          />
+                          <span>
+                            Pedido <strong>{order.code}</strong> aguardando há{' '}
+                            <strong>{waitingMinutes} min</strong> na maior
+                            categoria disponível (
+                            {formatVehicleModalDisplayName(currentVehicle)}).
+                          </span>
+                        </div>
+                      );
+                    }
+
+                    const nextOnlineCount =
+                      onlineCountsByVehicle[nextAvailableVehicle] || 0;
+                    const upgradedPricing = calculatePricing(
+                      order.type,
+                      order.distanceKm || 4.5,
+                      order.packageCount || Math.max(1, order.stops.length),
+                      order.freightDetails
+                        ? {
+                            cargoSize: order.freightDetails.cargoSize,
+                            includeHelper: order.freightDetails.includeHelper,
+                          }
+                        : undefined,
+                      nextAvailableVehicle
+                    );
+                    const isUpgrading = upgradingOrderId === order.id;
+
+                    return (
+                      <div className="mt-4 rounded-xl border-2 border-amber-400 bg-amber-50 p-3.5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex items-start gap-2.5 text-xs text-amber-950">
+                          <Clock
+                            className="h-4 w-4 text-amber-700 shrink-0 mt-0.5"
+                            aria-hidden="true"
+                          />
+                          <div className="space-y-0.5">
+                            <p className="font-bold">
+                              {order.code} aguardando aceite há {waitingMinutes}{' '}
+                              min em {formatVehicleModalDisplayName(currentVehicle)}
+                            </p>
+                            <p className="text-[11px] text-amber-900">
+                              Próxima categoria:{' '}
+                              <strong>
+                                {formatVehicleModalDisplayName(
+                                  nextAvailableVehicle
+                                )}
+                              </strong>{' '}
+                              (
+                              {nextOnlineCount > 0
+                                ? `${nextOnlineCount} entregador(es) online agora`
+                                : 'destravar para o próximo modal'}
+                              ) · Novo frete:{' '}
+                              <strong className="font-mono">
+                                {formatBRL(upgradedPricing.grossTotal)}
+                              </strong>
+                            </p>
+                          </div>
+                        </div>
+
+                        {onUpgradeOrderVehicle && (
+                          <button
+                            type="button"
+                            disabled={isUpgrading}
+                            onClick={() =>
+                              void handleUpgradeOrderVehicleClick(
+                                order.id,
+                                nextAvailableVehicle
+                              )
+                            }
+                            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-amber-600 px-3.5 py-2 text-xs font-bold text-white shadow-xs transition-colors hover:bg-amber-700 disabled:opacity-60 whitespace-nowrap shrink-0"
+                          >
+                            <ArrowUpRight
+                              className="h-4 w-4 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span>
+                              {isUpgrading
+                                ? 'Ampliando...'
+                                : 'Ampliar para próxima categoria disponível'}
+                            </span>
+                          </button>
+                        )}
                       </div>
                     );
                   })()}

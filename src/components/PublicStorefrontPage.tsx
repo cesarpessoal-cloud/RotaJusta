@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   ArrowLeft,
+  CalendarClock,
   CheckCircle2,
   ExternalLink,
   Loader2,
@@ -16,8 +18,10 @@ import {
   Trash2,
 } from 'lucide-react';
 import { resolvePortoAlegreCoordinates } from '../constants/portoAlegre';
+import { isSupabaseConfigured, supabase } from '../lib/supabase';
 import {
   createDeliveryInSupabase,
+  fetchOnlineCourierCountsByVehicleInSupabase,
   fetchPublicMerchantStorefrontInSupabase,
   PublicStorefrontData,
   updateDeliveryPaymentStatusInSupabase,
@@ -48,14 +52,23 @@ import {
 import {
   formatShortVehicleLabel,
   formatStorefrontItemsSummaryText,
+  isSafeImageUrl,
   resolveRecommendedVehicleForCart,
 } from '../utils/storefront';
+import { getTomorrowDateInputValue } from '../utils/schedule';
+import {
+  createEmptyOnlineCountsByVehicle,
+  OnlineCourierCountsByVehicle,
+  resolveVehicleWithOnlineFallback,
+  VEHICLE_CATEGORIES,
+} from '../utils/vehicleCompatibility';
 import { AddressAutocompleteFields } from './AddressAutocompleteFields';
 import { PixQrCodeSettlement } from './PixQrCodeSettlement';
 import { RatingBadge } from './RatingWidgets';
 
 interface PublicStorefrontPageProps {
   merchantId: string;
+  initialProductId?: string | null;
   onBackToRotaJusta: () => void;
   backButtonLabel?: string;
   onOpenTracking: (orderCode: string) => void;
@@ -69,6 +82,7 @@ interface CartEntry {
 
 export function PublicStorefrontPage({
   merchantId,
+  initialProductId,
   onBackToRotaJusta,
   backButtonLabel = 'Voltar ao RotaJusta',
   onOpenTracking,
@@ -104,6 +118,73 @@ export function PublicStorefrontPage({
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
   const [isConfirmingPixSent, setIsConfirmingPixSent] = useState(false);
 
+  // Real-time online couriers availability by vehicle category
+  const [onlineCounts, setOnlineCounts] = useState<OnlineCourierCountsByVehicle>(
+    () => createEmptyOnlineCountsByVehicle()
+  );
+  const [isLoadingAvailability, setIsLoadingAvailability] = useState(true);
+  const [manualVehicleChoice, setManualVehicleChoice] =
+    useState<VehicleType | null>(null);
+  const [deliveryArrangement, setDeliveryArrangement] = useState<
+    'imediata' | 'agendada_loja'
+  >('imediata');
+
+  const refreshOnlineAvailability = useCallback(async () => {
+    if (!isSupabaseConfigured) {
+      setIsLoadingAvailability(false);
+      return;
+    }
+    try {
+      const counts = await fetchOnlineCourierCountsByVehicleInSupabase();
+      setOnlineCounts(counts);
+    } catch {
+      // Silencioso em background na vitrine pública
+    } finally {
+      setIsLoadingAvailability(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshOnlineAvailability();
+    if (!isSupabaseConfigured) return;
+
+    const channel = supabase
+      .channel(`rotajusta-vitrine-availability-${merchantId}`)
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'profiles' },
+        () => {
+          void refreshOnlineAvailability();
+        }
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'products',
+          filter: `profile_id=eq.${merchantId}`,
+        },
+        () => {
+          void fetchPublicMerchantStorefrontInSupabase(merchantId)
+            .then((res) => {
+              if (res) setStoreData(res);
+            })
+            .catch(() => {});
+        }
+      )
+      .subscribe();
+
+    const intervalId = window.setInterval(() => {
+      void refreshOnlineAvailability();
+    }, 20000);
+
+    return () => {
+      window.clearInterval(intervalId);
+      void supabase.removeChannel(channel);
+    };
+  }, [merchantId, refreshOnlineAvailability]);
+
   useEffect(() => {
     let active = true;
     const loadStore = async () => {
@@ -117,6 +198,29 @@ export function PublicStorefrontPage({
           setStoreData(null);
         } else {
           setStoreData(res);
+          if (initialProductId) {
+            const matchedProduct = res.storefront.products.find(
+              (p) => p.active && p.id === initialProductId
+            );
+            if (matchedProduct) {
+              setCart((prev) =>
+                prev[matchedProduct.id]
+                  ? prev
+                  : {
+                      ...prev,
+                      [matchedProduct.id]: {
+                        product: matchedProduct,
+                        quantity: 1,
+                      },
+                    }
+              );
+              window.setTimeout(() => {
+                document
+                  .getElementById('vitrine-checkout')
+                  ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }, 220);
+            }
+          }
         }
       } catch (err) {
         if (!active) return;
@@ -182,6 +286,52 @@ export function PublicStorefrontPage({
     [cartItems]
   );
 
+  const allowedCartVehicles = useMemo(() => {
+    const startIdx = VEHICLE_CATEGORIES.indexOf(recommendedVehicle);
+    return startIdx >= 0
+      ? VEHICLE_CATEGORIES.slice(startIdx)
+      : VEHICLE_CATEGORIES;
+  }, [recommendedVehicle]);
+
+  useEffect(() => {
+    setManualVehicleChoice((prev) => {
+      if (!prev) return null;
+      if (!allowedCartVehicles.includes(prev)) return null;
+      if (!isLoadingAvailability && (onlineCounts[prev] || 0) === 0) {
+        return null;
+      }
+      return prev;
+    });
+  }, [allowedCartVehicles, onlineCounts, isLoadingAvailability]);
+
+  const vehicleAvailability = useMemo(
+    () =>
+      resolveVehicleWithOnlineFallback({
+        preferredVehicle: manualVehicleChoice || recommendedVehicle,
+        onlineCounts,
+        allowedVehicles: allowedCartVehicles,
+      }),
+    [manualVehicleChoice, recommendedVehicle, onlineCounts, allowedCartVehicles]
+  );
+
+  const effectiveVehicle = isLoadingAvailability
+    ? manualVehicleChoice || recommendedVehicle
+    : vehicleAvailability.selectedVehicle;
+
+  const isAnyOnlineCourierAvailable = vehicleAvailability.totalOnlineAll > 0;
+  const mustOfferScheduledFallback =
+    !isLoadingAvailability &&
+    (vehicleAvailability.totalOnlineAll === 0 ||
+      !vehicleAvailability.hasAnyAvailableInAllowed);
+
+  useEffect(() => {
+    if (mustOfferScheduledFallback) {
+      setDeliveryArrangement('agendada_loja');
+    } else {
+      setDeliveryArrangement('imediata');
+    }
+  }, [mustOfferScheduledFallback]);
+
   const pickupLocation = useMemo(() => {
     const sf = storeData?.storefront;
     const address = sf?.storeAddress || 'Rua dos Andradas, 1234';
@@ -226,9 +376,9 @@ export function PublicStorefrontPage({
         calculatedDistanceKm,
         1,
         undefined,
-        recommendedVehicle
+        effectiveVehicle
       ),
-    [calculatedDistanceKm, recommendedVehicle]
+    [calculatedDistanceKm, effectiveVehicle]
   );
 
   const grandTotal = useMemo(
@@ -313,9 +463,15 @@ export function PublicStorefrontPage({
     };
 
     const itemsText = formatStorefrontItemsSummaryText(storefrontOrder);
-    const noteCombined = [itemsText, deliveryNote.trim()]
+    const isScheduledWithStore =
+      mustOfferScheduledFallback && deliveryArrangement === 'agendada_loja';
+    const noteCombined = [
+      itemsText,
+      isScheduledWithStore ? 'Entrega agendada / Combinar com a loja' : '',
+      deliveryNote.trim(),
+    ]
       .filter(Boolean)
-      .join(' · Obs: ');
+      .join(' · ');
 
     const newOrderId = crypto.randomUUID();
     const stopId = crypto.randomUUID();
@@ -324,13 +480,21 @@ export function PublicStorefrontPage({
       storeData.merchant.businessName ||
       storeData.merchant.name;
 
+    const tomorrowDate = getTomorrowDateInputValue();
+
     const newOrder: Order = {
       id: newOrderId,
       code: formatPickupCode(newOrderId),
       type: 'rapida',
-      requestedVehicle: recommendedVehicle,
+      requestedVehicle: effectiveVehicle,
       flowDirection: 'enviar',
-      pickupSchedule: { mode: 'imediata' },
+      pickupSchedule: isScheduledWithStore
+        ? {
+            mode: 'agendada',
+            readyAt: `${tomorrowDate}T09:00`,
+            deadlineAt: `${tomorrowDate}T18:00`,
+          }
+        : { mode: 'imediata' },
       merchantId: storeData.merchant.id,
       merchantName: displayStoreName,
       merchantPhone: storeData.merchant.phone,
@@ -500,7 +664,12 @@ export function PublicStorefrontPage({
                 : storeDisplayName;
             const trackingUrl = buildTrackingUrl(createdOrder.code);
             const storePhone = extractBrPhoneDigits(storeData.merchant.phone);
-            const whatsappMsg = `Olá *${storeDisplayName}*! Acabei de fazer o pedido *${createdOrder.code}* na sua vitrine do RotaJusta:\n${
+            const isScheduledOrder = createdOrder.pickupSchedule?.mode === 'agendada';
+            const whatsappMsg = `Olá *${storeDisplayName}*! Acabei de fazer o pedido *${createdOrder.code}* na sua vitrine do RotaJusta:${
+              isScheduledOrder
+                ? '\nModalidade: *Entrega agendada / Combinar com a loja*'
+                : ''
+            }\n${
               summary
                 ? summary.items
                     .map(
@@ -533,6 +702,12 @@ export function PublicStorefrontPage({
                         {createdOrder.stops[0]?.address} (
                         {createdOrder.stops[0]?.neighborhood})
                       </p>
+                      {isScheduledOrder && (
+                        <p className="inline-flex items-center gap-1.5 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900 mt-1">
+                          <CalendarClock className="h-3.5 w-3.5 text-amber-700 shrink-0" aria-hidden="true" />
+                          <span>Entrega agendada / Combinar com a loja</span>
+                        </p>
+                      )}
                     </div>
                     <span className="rounded-lg bg-zinc-950 px-3 py-1.5 font-mono text-sm font-black text-white">
                       {createdOrder.code}
@@ -750,7 +925,7 @@ export function PublicStorefrontPage({
                         >
                           <div>
                             <div className="aspect-[4/3] w-full bg-zinc-100 overflow-hidden">
-                              {product.imageUrl ? (
+                              {isSafeImageUrl(product.imageUrl) ? (
                                 <img
                                   src={product.imageUrl}
                                   alt={product.name}
@@ -1020,6 +1195,139 @@ export function PublicStorefrontPage({
                     </div>
                   </div>
 
+                  {/* Disponibilidade em Tempo Real por Categoria + Fallback Automático */}
+                  <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold text-zinc-800">
+                        Modal de Entrega (Entregadores Online Agora)
+                      </span>
+                      <span className="font-mono text-[11px] font-semibold text-emerald-700 tabular-nums">
+                        {isLoadingAvailability
+                          ? 'Verificando...'
+                          : `${vehicleAvailability.totalOnlineAll} online em POA`}
+                      </span>
+                    </div>
+
+                    {!isLoadingAvailability &&
+                      vehicleAvailability.wasPreferredUnavailable &&
+                      vehicleAvailability.hasAnyAvailableInAllowed && (
+                        <div className="flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-950">
+                          <AlertTriangle
+                            className="h-3.5 w-3.5 text-amber-700 shrink-0 mt-0.5"
+                            aria-hidden="true"
+                          />
+                          <span>
+                            Sem entregadores de{' '}
+                            <strong>
+                              {formatShortVehicleLabel(recommendedVehicle)}
+                            </strong>{' '}
+                            online agora. Selecionamos automaticamente{' '}
+                            <strong>
+                              {formatShortVehicleLabel(effectiveVehicle)}
+                            </strong>{' '}
+                            e recalculamos o frete de forma transparente.
+                          </span>
+                        </div>
+                      )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      {VEHICLE_CATEGORIES.map((category) => {
+                        const onlineCount = onlineCounts[category] || 0;
+                        const isLighterThanRecommended =
+                          VEHICLE_CATEGORIES.indexOf(category) <
+                          VEHICLE_CATEGORIES.indexOf(recommendedVehicle);
+                        const isUnavailableOnline =
+                          !isLoadingAvailability && onlineCount === 0;
+                        const isDisabled =
+                          isLighterThanRecommended ||
+                          (isAnyOnlineCourierAvailable && isUnavailableOnline);
+                        const isSelected = effectiveVehicle === category;
+                        const previewFreight = calculatePricing(
+                          'rapida',
+                          calculatedDistanceKm,
+                          1,
+                          undefined,
+                          category
+                        );
+
+                        return (
+                          <button
+                            key={category}
+                            type="button"
+                            disabled={isDisabled}
+                            onClick={() => setManualVehicleChoice(category)}
+                            className={`rounded-lg border p-2.5 text-left transition-colors ${
+                              isSelected
+                                ? 'border-emerald-600 bg-emerald-50 text-emerald-950 shadow-2xs'
+                                : isDisabled
+                                ? 'border-zinc-200 bg-zinc-100/80 text-zinc-400 cursor-not-allowed opacity-75'
+                                : 'border-zinc-200 bg-white text-zinc-800 hover:bg-zinc-50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-xs font-bold truncate">
+                                {formatShortVehicleLabel(category)}
+                              </span>
+                              <span className="font-mono text-[11px] font-semibold tabular-nums shrink-0">
+                                {formatBRL(previewFreight.grossTotal)}
+                              </span>
+                            </div>
+                            <p
+                              className={`mt-1 text-[10px] font-medium ${
+                                isLighterThanRecommended
+                                  ? 'text-zinc-400'
+                                  : isUnavailableOnline
+                                  ? 'text-amber-700 font-semibold'
+                                  : 'text-emerald-700'
+                              }`}
+                            >
+                              {isLighterThanRecommended
+                                ? 'Item exige veículo maior'
+                                : isLoadingAvailability
+                                ? 'Consultando...'
+                                : isUnavailableOnline
+                                ? 'Sem entregadores online agora'
+                                : `${onlineCount} entregador(es) online`}
+                            </p>
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    {mustOfferScheduledFallback && (
+                      <div className="rounded-lg border-2 border-amber-300 bg-amber-50 p-3 space-y-2">
+                        <div className="flex items-start gap-2 text-xs text-amber-950">
+                          <CalendarClock
+                            className="h-4 w-4 text-amber-700 shrink-0 mt-0.5"
+                            aria-hidden="true"
+                          />
+                          <div className="space-y-0.5">
+                            <p className="font-bold">
+                              Entrega agendada / Combinar com a loja
+                            </p>
+                            <p className="text-[11px] text-amber-900 leading-relaxed">
+                              Não há entregadores online em nenhuma categoria no
+                              momento. Ativamos o envio agendado para você fechar seu
+                              pedido agora e combinar o horário de entrega direto com
+                              a loja.
+                            </p>
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDeliveryArrangement('agendada_loja')}
+                          className={`w-full rounded-lg border px-3 py-2 text-xs font-bold transition-colors ${
+                            deliveryArrangement === 'agendada_loja'
+                              ? 'border-amber-600 bg-amber-600 text-white'
+                              : 'border-amber-300 bg-white text-amber-900 hover:bg-amber-100'
+                          }`}
+                        >
+                          ✓ Entrega agendada / Combinar com a loja selecionada
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   {/* Resumo em Tempo Real: Produtos + Frete RotaJusta */}
                   <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-4 space-y-2 text-xs">
                     <div className="flex items-center justify-between text-zinc-700">
@@ -1037,13 +1345,20 @@ export function PublicStorefrontPage({
                           {hasDestinationFilled
                             ? `${calculatedDistanceKm} km`
                             : 'estimativa inicial 3 km'}{' '}
-                          · {formatVehicleModalDisplayName(recommendedVehicle)})
+                          · {formatVehicleModalDisplayName(effectiveVehicle)})
                         </span>
                       </span>
                       <span className="font-mono font-semibold text-zinc-900 tabular-nums">
                         {formatBRL(freightPricing.grossTotal)}
                       </span>
                     </div>
+
+                    {mustOfferScheduledFallback && (
+                      <p className="inline-flex items-center gap-1.5 rounded bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-950">
+                        <CalendarClock className="h-3 w-3 shrink-0" aria-hidden="true" />
+                        <span>Entrega agendada / Combinar com a loja</span>
+                      </p>
+                    )}
 
                     <p className="text-[11px] text-zinc-500">
                       Origem: {pickupLocation.neighborhood} → Destino:{' '}

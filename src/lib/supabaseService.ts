@@ -18,6 +18,7 @@ import {
   Profile,
   PropulsionType,
   Rating,
+  StoreProduct,
   UserRole,
   VehicleType,
 } from '../types';
@@ -35,9 +36,15 @@ import {
   encodeStorefrontMetaInCompanyName,
   encodeStorefrontOrderTag,
   formatStorefrontItemsSummaryText,
+  normalizeStorefrontVehicle,
 } from '../utils/storefront';
 import { normalizePlateForDisplay } from '../utils/courierIdentity';
 import { verifyTotpCode } from '../utils/totp';
+import {
+  createEmptyOnlineCountsByVehicle,
+  normalizeCourierVehicleCategory,
+  OnlineCourierCountsByVehicle,
+} from '../utils/vehicleCompatibility';
 import { supabase } from './supabase';
 
 export type DbApprovalStatus = 'pendente' | 'aprovado' | 'bloqueado';
@@ -121,6 +128,34 @@ interface DbDeliveryStopRow {
   delivered_at: string | null;
   proof_recipient: string | null;
   proof_photo_base64: string | null;
+}
+
+interface DbProductRow {
+  id: string;
+  profile_id: string;
+  name: string;
+  description: string | null;
+  price: number | string | null;
+  image_url: string | null;
+  recommended_vehicle: string | null;
+  is_active: boolean | null;
+}
+
+const PRODUCT_COLUMNS =
+  'id, profile_id, name, description, price, image_url, recommended_vehicle, is_active';
+
+function normalizeProductFromDbRow(row: DbProductRow): StoreProduct {
+  return {
+    id: row.id,
+    profileId: row.profile_id,
+    name: row.name,
+    description: row.description || '',
+    price: Math.max(0, Number(row.price) || 0),
+    imageUrl: row.image_url?.trim() || undefined,
+    recommendedVehicle: normalizeStorefrontVehicle(row.recommended_vehicle),
+    active: row.is_active !== false,
+    createdAt: new Date().toISOString(),
+  };
 }
 
 export function mapDbStatusToApproval(status?: string | null): ApprovalStatus {
@@ -788,6 +823,38 @@ export async function fetchOnlineCouriersCountInSupabase(): Promise<number> {
   return count ?? 0;
 }
 
+/**
+ * Consulta agregada pública por categoria de veículo: retorna apenas a contagem
+ * de entregadores/motoristas aprovados e atualmente ONLINE por modal (Bike, Moto, Carro, Utilitário),
+ * sem expor dados pessoais.
+ */
+export async function fetchOnlineCourierCountsByVehicleInSupabase(): Promise<OnlineCourierCountsByVehicle> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('role, vehicle_type')
+    .eq('status', 'aprovado')
+    .in('role', ['entregador', 'motorista'])
+    .eq('is_online', true);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  const counts = createEmptyOnlineCountsByVehicle();
+  for (const row of (data || []) as Array<{
+    role?: string | null;
+    vehicle_type?: string | null;
+  }>) {
+    const category = normalizeCourierVehicleCategory(
+      row.vehicle_type,
+      row.role
+    );
+    counts[category] += 1;
+  }
+
+  return counts;
+}
+
 export async function loginWithPhoneAndPin(
   identifier: string,
   pin: string
@@ -815,7 +882,9 @@ export async function loginWithPhoneAndPin(
     }
 
     if (roleMatch && roleMatch.length > 0) {
-      return normalizeProfileFromRow(roleMatch[0]);
+      const normalized = normalizeProfileFromRow(roleMatch[0]);
+      const [withProducts] = await attachProductsToProfiles([normalized]);
+      return withProducts;
     }
 
     const { data: phoneMatch, error: phoneError } =
@@ -834,7 +903,9 @@ export async function loginWithPhoneAndPin(
 
     if (phoneMatch && phoneMatch.length > 0) {
       const row = phoneMatch[0];
-      return normalizeProfileFromRow({ ...row, role: 'admin' });
+      const normalized = normalizeProfileFromRow({ ...row, role: 'admin' });
+      const [withProducts] = await attachProductsToProfiles([normalized]);
+      return withProducts;
     }
 
     return null;
@@ -860,7 +931,74 @@ export async function loginWithPhoneAndPin(
     return null;
   }
 
-  return normalizeProfileFromRow(data[0]);
+  const normalized = normalizeProfileFromRow(data[0]);
+  const [withProducts] = await attachProductsToProfiles([normalized]);
+  return withProducts;
+}
+
+async function fetchProductsMapByProfileIds(
+  profileIds?: string[],
+  onlyActive = false
+): Promise<Map<string, StoreProduct[]>> {
+  const byProfile = new Map<string, StoreProduct[]>();
+  const cleanIds = profileIds
+    ? Array.from(new Set(profileIds.map((id) => id.trim()).filter(Boolean)))
+    : undefined;
+  if (cleanIds && cleanIds.length === 0) return byProfile;
+
+  let query = supabase.from('products').select(PRODUCT_COLUMNS);
+  if (onlyActive) {
+    query = query.eq('is_active', true);
+  }
+  if (cleanIds) {
+    query = query.in('profile_id', cleanIds);
+  }
+
+  const { data, error } = await query;
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  for (const row of (data || []) as DbProductRow[]) {
+    const product = normalizeProductFromDbRow(row);
+    const list = byProfile.get(row.profile_id) || [];
+    list.push(product);
+    byProfile.set(row.profile_id, list);
+  }
+
+  return byProfile;
+}
+
+async function attachProductsToProfiles(
+  profilesList: Profile[]
+): Promise<Profile[]> {
+  const merchantIds = profilesList
+    .filter((p) => p.role === 'lojista' || p.role === 'admin')
+    .map((p) => p.id);
+
+  if (merchantIds.length === 0) return profilesList;
+
+  try {
+    const productsMap = await fetchProductsMapByProfileIds(merchantIds, false);
+    return profilesList.map((profile) => {
+      if (profile.role !== 'lojista' && profile.role !== 'admin') {
+        return profile;
+      }
+      const dbProducts = productsMap.get(profile.id);
+      if (!dbProducts || dbProducts.length === 0) {
+        return profile;
+      }
+      return {
+        ...profile,
+        storefront: {
+          ...(profile.storefront || {}),
+          products: dbProducts,
+        },
+      };
+    });
+  } catch {
+    return profilesList;
+  }
 }
 
 export async function fetchAllProfiles(): Promise<Profile[]> {
@@ -875,7 +1013,8 @@ export async function fetchAllProfiles(): Promise<Profile[]> {
     throw new Error(error.message);
   }
 
-  return (data || []).map(normalizeProfileFromRow);
+  const normalized = (data || []).map(normalizeProfileFromRow);
+  return attachProductsToProfiles(normalized);
 }
 
 /**
@@ -891,7 +1030,10 @@ export async function fetchPublicProfilesDirectory(): Promise<Profile[]> {
 
     if (!error) {
       supportsCourierIdentityColumns = true;
-      return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+      const normalized = ((data || []) as DbProfileRow[]).map(
+        normalizeProfileFromRow
+      );
+      return attachProductsToProfiles(normalized);
     }
 
     if (!isMissingCourierIdentityColumnError(error)) {
@@ -909,7 +1051,10 @@ export async function fetchPublicProfilesDirectory(): Promise<Profile[]> {
     throw new Error(error.message);
   }
 
-  return ((data || []) as DbProfileRow[]).map(normalizeProfileFromRow);
+  const normalized = ((data || []) as DbProfileRow[]).map(
+    normalizeProfileFromRow
+  );
+  return attachProductsToProfiles(normalized);
 }
 
 export async function fetchApprovedCouriers(): Promise<Profile[]> {
@@ -2140,6 +2285,101 @@ export async function acceptDeliveryInSupabase(
   );
 }
 
+/**
+ * Amplia a categoria de veículo solicitada de um pedido em espera (#RS-XXXX)
+ * para o próximo modal disponível sem cancelar nem recriar a corrida,
+ * recalculando o valor total, taxa operacional e repasse base no Supabase.
+ */
+export async function upgradeWaitingOrderVehicleInSupabase(params: {
+  order: Order;
+  nextVehicle: VehicleType;
+  profilesList?: Profile[];
+}): Promise<Order> {
+  const { order, nextVehicle, profilesList } = params;
+  const recalculated = calculatePricing(
+    order.type,
+    order.distanceKm || 4.5,
+    order.packageCount || Math.max(1, order.stops.length),
+    order.freightDetails
+      ? {
+          cargoSize: order.freightDetails.cargoSize,
+          includeHelper: order.freightDetails.includeHelper,
+        }
+      : undefined,
+    nextVehicle
+  );
+
+  const { data: currentRow, error: fetchError } = await supabase
+    .from('deliveries')
+    .select('source_channel')
+    .eq('id', order.id)
+    .single();
+
+  if (fetchError) {
+    throw new Error(fetchError.message);
+  }
+
+  const rawSource =
+    ((currentRow as { source_channel?: string | null } | null)?.source_channel) ||
+    order.merchantName ||
+    'Lojista Porto Alegre';
+
+  const nextTag = encodeVehicleTag(nextVehicle) || 'moto';
+  let nextSource = /\[VEH:(?:bike|moto|carro|utilitario)\]/i.test(rawSource)
+    ? rawSource.replace(
+        /\[VEH:(?:bike|moto|carro|utilitario)\]/gi,
+        `[VEH:${nextTag}]`
+      )
+    : `${rawSource} [VEH:${nextTag}]`;
+
+  if (order.storefrontOrder) {
+    const updatedStorefrontOrder = {
+      ...order.storefrontOrder,
+      freightTotal: recalculated.grossTotal,
+      grandTotal: Number(
+        (
+          order.storefrontOrder.productsSubtotal + recalculated.grossTotal
+        ).toFixed(2)
+      ),
+    };
+    const encodedVord = encodeStorefrontOrderTag(updatedStorefrontOrder);
+    if (/\[VORD:[^\]]*\]/.test(nextSource)) {
+      nextSource = nextSource.replace(/\[VORD:[^\]]*\]/g, encodedVord);
+    } else {
+      nextSource = `${nextSource} ${encodedVord}`;
+    }
+  }
+
+  const { data: updatedRow, error: updateError } = await supabase
+    .from('deliveries')
+    .update({
+      total_price: recalculated.grossTotal,
+      platform_fee: recalculated.standardPlatformFee,
+      driver_payout: recalculated.basePayout,
+      source_channel: nextSource.trim(),
+    })
+    .eq('id', order.id)
+    .eq('status', 'aguardando')
+    .select('*')
+    .single();
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  const deliveryId = (updatedRow as DbDeliveryRow).id;
+  const stopsMap = await fetchStopsForDeliveries([deliveryId]);
+  const profileMap = new Map(
+    (profilesList || []).map((p) => [p.id, p] as const)
+  );
+
+  return normalizeOrderFromRows(
+    updatedRow as DbDeliveryRow,
+    stopsMap.get(deliveryId) || [],
+    profileMap
+  );
+}
+
 export async function fetchProfilesPhonesByIds(
   profileIds: string[]
 ): Promise<Map<string, string>> {
@@ -2499,6 +2739,92 @@ export async function seedInitialSupabaseData(): Promise<{
   };
 }
 
+export async function fetchProductsForProfileInSupabase(
+  profileId: string
+): Promise<StoreProduct[]> {
+  const cleanId = profileId.trim();
+  if (!cleanId) return [];
+
+  const { data, error } = await supabase
+    .from('products')
+    .select(PRODUCT_COLUMNS)
+    .eq('profile_id', cleanId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return ((data || []) as DbProductRow[]).map(normalizeProductFromDbRow);
+}
+
+export async function upsertStoreProductInSupabase(params: {
+  profileId: string;
+  product: StoreProduct;
+}): Promise<StoreProduct> {
+  const cleanProfileId = params.profileId.trim();
+  if (!cleanProfileId) {
+    throw new Error('Identificador da loja inválido para salvar o produto.');
+  }
+
+  const payload = {
+    id: params.product.id,
+    profile_id: cleanProfileId,
+    name: params.product.name.trim(),
+    description: params.product.description.trim() || null,
+    price: Number(Math.max(0, params.product.price).toFixed(2)),
+    image_url: params.product.imageUrl?.trim() || null,
+    recommended_vehicle: params.product.recommendedVehicle,
+    is_active: Boolean(params.product.active),
+  };
+
+  const { data, error } = await supabase
+    .from('products')
+    .upsert(payload, { onConflict: 'id' })
+    .select(PRODUCT_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeProductFromDbRow(data as DbProductRow);
+}
+
+export async function toggleStoreProductActiveInSupabase(params: {
+  productId: string;
+  profileId: string;
+  isActive: boolean;
+}): Promise<StoreProduct> {
+  const { data, error } = await supabase
+    .from('products')
+    .update({ is_active: Boolean(params.isActive) })
+    .eq('id', params.productId)
+    .eq('profile_id', params.profileId)
+    .select(PRODUCT_COLUMNS)
+    .single();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return normalizeProductFromDbRow(data as DbProductRow);
+}
+
+export async function deleteStoreProductInSupabase(params: {
+  productId: string;
+  profileId: string;
+}): Promise<void> {
+  const { error } = await supabase
+    .from('products')
+    .delete()
+    .eq('id', params.productId)
+    .eq('profile_id', params.profileId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+}
+
 export async function saveMerchantStorefrontInSupabase(params: {
   profileId: string;
   storefront: MerchantStorefrontConfig;
@@ -2519,9 +2845,16 @@ export async function saveMerchantStorefrontInSupabase(params: {
   )?.company_legal_name;
   const { cleanLegalName } = decodeStorefrontMetaFromCompanyName(existingRaw);
 
+  // Store metadata (name, description, address, coordinates) in profile metadata,
+  // while products are persisted in public.products table.
+  const storefrontMetaOnly: MerchantStorefrontConfig = {
+    ...params.storefront,
+    products: [],
+  };
+
   const encodedCompanyLegal = encodeStorefrontMetaInCompanyName(
     cleanLegalName,
-    params.storefront
+    storefrontMetaOnly
   );
 
   const updateFields: Record<string, unknown> = {
@@ -2544,7 +2877,30 @@ export async function saveMerchantStorefrontInSupabase(params: {
     throw new Error(error.message);
   }
 
-  return normalizeProfileFromRow(data as unknown as DbProfileRow);
+  if (params.storefront.products && params.storefront.products.length > 0) {
+    for (const prod of params.storefront.products) {
+      await upsertStoreProductInSupabase({
+        profileId: params.profileId,
+        product: prod,
+      });
+    }
+  }
+
+  const currentProducts = await fetchProductsForProfileInSupabase(
+    params.profileId
+  ).catch(() => params.storefront.products || []);
+
+  const normalizedProfile = normalizeProfileFromRow(
+    data as unknown as DbProfileRow
+  );
+
+  return {
+    ...normalizedProfile,
+    storefront: {
+      ...(normalizedProfile.storefront || params.storefront),
+      products: currentProducts,
+    },
+  };
 }
 
 export interface PublicStorefrontData {
@@ -2573,10 +2929,18 @@ export async function fetchPublicMerchantStorefrontInSupabase(
   if (!row) return null;
 
   const merchant = normalizeProfileFromRow(row as unknown as DbProfileRow);
-  const platformPixKey = await fetchPlatformPixKey().catch(() => null);
+  const [platformPixKey, dbProducts] = await Promise.all([
+    fetchPlatformPixKey().catch(() => null),
+    fetchProductsForProfileInSupabase(cleanId).catch(() => null),
+  ]);
 
-  const baseStorefront: MerchantStorefrontConfig = merchant.storefront || {
-    products: [],
+  const legacyProducts = merchant.storefront?.products || [];
+  const resolvedProducts =
+    dbProducts && dbProducts.length > 0 ? dbProducts : legacyProducts;
+
+  const baseStorefront: MerchantStorefrontConfig = {
+    ...(merchant.storefront || {}),
+    products: resolvedProducts,
   };
 
   if (!baseStorefront.storeAddress) {
@@ -2609,4 +2973,108 @@ export async function fetchPublicMerchantStorefrontInSupabase(
     storefront: baseStorefront,
     platformPixKey,
   };
+}
+
+export interface PublicActiveStorefrontListing {
+  merchantId: string;
+  storeName: string;
+  storeDescription?: string;
+  storeAddress: string;
+  neighborhood: string;
+  storeLat: number;
+  storeLng: number;
+  storePixKey?: string;
+  ratingAvg?: number;
+  ratingCount?: number;
+  activeProducts: StoreProduct[];
+}
+
+export interface PublicLandingCatalogData {
+  listings: PublicActiveStorefrontListing[];
+  platformPixKey: string | null;
+}
+
+/**
+ * Consulta pública do Comércio Local no RotaJusta:
+ * carrega os produtos ativos da tabela `public.products` (`is_active = true`)
+ * e associa ao nome e localização da loja parceira aprovada (sem expor CPF/CNPJ, telefone ou PIN).
+ */
+export async function fetchPublicLandingCatalogInSupabase(): Promise<PublicLandingCatalogData> {
+  const [productsRes, profilesRes, platformPixKey] = await Promise.all([
+    supabase.from('products').select(PRODUCT_COLUMNS).eq('is_active', true),
+    supabase
+      .from('profiles')
+      .select(
+        'id, name, person_type, company_legal_name, role, pix_key, rating_avg, rating_count, status, created_at'
+      )
+      .eq('status', 'aprovado')
+      .in('role', ['lojista', 'admin'])
+      .order('created_at', { ascending: false }),
+    fetchPlatformPixKey().catch(() => null),
+  ]);
+
+  if (productsRes.error) {
+    throw new Error(productsRes.error.message);
+  }
+  if (profilesRes.error) {
+    throw new Error(profilesRes.error.message);
+  }
+
+  const activeProductsByProfile = new Map<string, StoreProduct[]>();
+  for (const row of (productsRes.data || []) as DbProductRow[]) {
+    const normalized = normalizeProductFromDbRow(row);
+    const list = activeProductsByProfile.get(row.profile_id) || [];
+    list.push(normalized);
+    activeProductsByProfile.set(row.profile_id, list);
+  }
+
+  const listings: PublicActiveStorefrontListing[] = [];
+
+  for (const row of (profilesRes.data || []) as DbProfileRow[]) {
+    const profile = normalizeProfileFromRow(row);
+    const sf = profile.storefront;
+    const dbProducts = activeProductsByProfile.get(profile.id) || [];
+    const legacyActive = (sf?.products || []).filter((p) => p.active);
+    const activeProducts = dbProducts.length > 0 ? dbProducts : legacyActive;
+
+    if (activeProducts.length === 0) continue;
+
+    const resolvedAddress = sf?.storeAddress || 'Rua dos Andradas, 1234';
+    const resolvedNeighborhood = sf?.storeNeighborhood || 'Centro Histórico';
+    const resolvedCoords =
+      sf?.storeLat !== undefined && sf?.storeLng !== undefined
+        ? { lat: sf.storeLat, lng: sf.storeLng }
+        : resolvePortoAlegreCoordinates(
+            resolvedAddress,
+            resolvedNeighborhood,
+            0
+          );
+
+    listings.push({
+      merchantId: profile.id,
+      storeName:
+        sf?.storeName || profile.businessName || profile.name || 'Loja Local',
+      storeDescription: sf?.storeDescription,
+      storeAddress: resolvedAddress,
+      neighborhood: resolvedNeighborhood,
+      storeLat: resolvedCoords.lat,
+      storeLng: resolvedCoords.lng,
+      storePixKey: profile.pixKey || undefined,
+      ratingAvg: profile.ratingAvg,
+      ratingCount: profile.ratingCount,
+      activeProducts,
+    });
+  }
+
+  return {
+    listings,
+    platformPixKey,
+  };
+}
+
+export async function fetchPublicActiveStorefrontsInSupabase(): Promise<
+  PublicActiveStorefrontListing[]
+> {
+  const { listings } = await fetchPublicLandingCatalogInSupabase();
+  return listings;
 }
