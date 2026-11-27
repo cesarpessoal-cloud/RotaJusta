@@ -402,10 +402,10 @@ export function LandingPage({
               </div>
               <div className="space-y-1">
                 <p className="font-display text-lg font-bold text-emerald-400 tabular-nums">
-                  Incentivo EV
+                  -50% na Taxa EV
                 </p>
                 <p className="text-xs text-zinc-400">
-                  Taxa zero para bikes e veículos elétricos em Porto Alegre.
+                  Desconto automático de 50% na taxa para bikes e veículos elétricos em Porto Alegre.
                 </p>
               </div>
             </div>
@@ -561,7 +561,7 @@ export function LandingPage({
                       <Zap className="h-5 w-5" aria-hidden="true" />
                     </div>
                     <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-semibold text-emerald-300">
-                      Taxa Zero EV &amp; Bike
+                      -50% Taxa EV &amp; Bike
                     </span>
                   </div>
 
@@ -604,10 +604,10 @@ export function LandingPage({
                       <span>
                         <strong className="text-emerald-300">
                           Incentivo especial para motos e carros elétricos (e
-                          E-Bikes):
+                          E-Bikes / bicicletas):
                         </strong>{' '}
-                        taxa da plataforma zerada e convertida em bônus para
-                        você.
+                        desconto automático de 50% na taxa da plataforma sobre a
+                        categoria a combustão.
                       </span>
                     </li>
                   </ul>

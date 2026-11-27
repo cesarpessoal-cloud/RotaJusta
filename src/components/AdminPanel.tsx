@@ -42,10 +42,10 @@ import {
   PIX_KEY_TYPES,
 } from '../utils/pix';
 import {
-  formatPlateInput,
   formatVehicleModelAndColor,
   isValidBrazilianPlate,
 } from '../utils/courierIdentity';
+import { getFipeGroupForVehicleType } from '../utils/fipeApi';
 import { compressImageToJpeg } from '../utils/imageCompression';
 import {
   formatCnpjMask,
@@ -63,13 +63,14 @@ import {
   formatPickupCode,
   normalizeCodeSearchQuery,
 } from '../utils/pickupCode';
-import { formatBRL, formatDateTimeBR, isZeroFeePropulsion } from '../utils/pricing';
+import { formatBRL, formatDateTimeBR, hasCleanMobilityDiscount } from '../utils/pricing';
 import {
   BIKE_RADIUS_OPTIONS,
   getPropulsionOptionsForVehicle,
   VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
 import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
+import { FipeVehicleFields } from './FipeVehicleFields';
 import {
   ApprovalStatusBadge,
   OrderStatusBadge,
@@ -475,7 +476,12 @@ export function AdminPanel({
   };
 
   const handleEditVehicleChange = (nextVehicle: VehicleType) => {
+    const prevGroup = getFipeGroupForVehicleType(editVehicleType);
+    const nextGroup = getFipeGroupForVehicleType(nextVehicle);
     setEditVehicleType(nextVehicle);
+    if (prevGroup !== nextGroup) {
+      setEditVehicleModel('');
+    }
     const allowed = getPropulsionOptionsForVehicle(nextVehicle);
     if (!allowed.includes(editPropulsion)) {
       setEditPropulsion(allowed[0]);
@@ -775,11 +781,11 @@ export function AdminPanel({
         </div>
 
         <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 sm:p-5">
-          <p className="text-xs font-medium text-emerald-900">Bônus EV Revertido</p>
+          <p className="text-xs font-medium text-emerald-900">Desconto Bike/EV Aplicado</p>
           <p className="mt-1 font-mono text-2xl font-bold text-emerald-700 tabular-nums">
             {formatBRL(totalEvIncentive)}
           </p>
-          <p className="mt-1 text-xs text-emerald-800">Taxa zero para elétricos</p>
+          <p className="mt-1 text-xs text-emerald-800">50% de desconto na taxa para bikes e elétricos</p>
         </div>
       </section>
 
@@ -1742,13 +1748,21 @@ export function AdminPanel({
                       {formatBRL(order.grossTotal)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums whitespace-nowrap">
-                      {isZeroFeePropulsion(order.assignedCourierPropulsion) ? (
+                      {hasCleanMobilityDiscount(
+                        order.assignedCourierPropulsion,
+                        order.assignedCourierVehicleType
+                      ) ? (
                         <span className="text-emerald-700 font-medium">
-                          Taxa R$ 0,00 · +{formatBRL(order.evBonusApplied ?? 0)}
+                          Taxa{' '}
+                          {formatBRL(
+                            order.appliedPlatformFee ??
+                              Number((order.standardPlatformFee * 0.5).toFixed(2))
+                          )}{' '}
+                          (-50% · +{formatBRL(order.evBonusApplied ?? 0)})
                         </span>
                       ) : (
                         <span className="text-zinc-600">
-                          Taxa {formatBRL(order.standardPlatformFee)}
+                          Taxa {formatBRL(order.appliedPlatformFee ?? order.standardPlatformFee)}
                         </span>
                       )}
                     </td>
@@ -2049,7 +2063,7 @@ export function AdminPanel({
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
                       <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                        Categoria do Veículo
+                        Tipo de Veículo
                       </label>
                       <select
                         value={editVehicleType}
@@ -2086,53 +2100,23 @@ export function AdminPanel({
                         )}
                       </select>
                     </div>
+                  </div>
 
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                        Modelo do Veículo
-                      </label>
-                      <input
-                        type="text"
-                        value={editVehicleModel}
-                        onChange={(e) => setEditVehicleModel(e.target.value)}
-                        placeholder="Ex: Honda CG 160"
-                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
-                      />
-                    </div>
+                  <FipeVehicleFields
+                    key={editingProfile.id}
+                    idPrefix="admin-edit"
+                    vehicleType={editVehicleType}
+                    vehicleModel={editVehicleModel}
+                    vehicleColor={editVehicleColor}
+                    plate={editPlate}
+                    onChangeVehicleModel={setEditVehicleModel}
+                    onChangeVehicleColor={setEditVehicleColor}
+                    onChangePlate={setEditPlate}
+                    required={false}
+                    plateRequired={false}
+                  />
 
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                        Cor do Veículo
-                      </label>
-                      <input
-                        type="text"
-                        value={editVehicleColor}
-                        onChange={(e) => setEditVehicleColor(e.target.value)}
-                        placeholder="Ex: Preta"
-                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
-                      />
-                    </div>
-
-                    <div>
-                      <label className="block text-xs font-semibold text-zinc-700 mb-1">
-                        Placa{' '}
-                        {editVehicleType === 'Bike'
-                          ? '(Não exigida para Bike)'
-                          : '(Mercosul / Antiga)'}
-                      </label>
-                      <input
-                        type="text"
-                        value={editPlate}
-                        disabled={editVehicleType === 'Bike'}
-                        onChange={(e) =>
-                          setEditPlate(formatPlateInput(e.target.value))
-                        }
-                        placeholder={
-                          editVehicleType === 'Bike' ? 'Não exigida' : 'ABC1D23'
-                        }
-                        className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs uppercase text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
-                      />
-                    </div>
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
 
                     {editVehicleType === 'Bike' && (
                       <div>

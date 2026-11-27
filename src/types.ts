@@ -122,6 +122,7 @@ export interface Order {
   id: string;
   code: string;
   type: OrderType;
+  requestedVehicle?: VehicleType;
   flowDirection?: OrderFlowDirection;
   pickupSchedule?: PickupSchedule;
   merchantId: string;
@@ -139,8 +140,8 @@ export interface Order {
   freightDetails?: FreightDetails;
   stops: DeliveryStop[];
   grossTotal: number; // Valor total do pedido pago pelo lojista
-  standardPlatformFee: number; // Taxa padrão fixa (R$ 0,50, R$ 0,30/pacote ou R$ 3,00 frete)
-  basePayout: number; // Repasse base após taxa padrão
+  standardPlatformFee: number; // Taxa operacional inicial da plataforma conforme modal
+  basePayout: number; // Repasse líquido base após taxa operacional inicial
   status: OrderStatus;
   paymentMethod?: PixPaymentMethod;
   paymentStatus?: PaymentStatus;
@@ -165,6 +166,11 @@ export interface Order {
 }
 
 export interface PricingBreakdown {
+  vehicleCategory: VehicleType;
+  baseKm: number;
+  perKmRate: number;
+  perPackageRate: number;
+  perPackageFee: number;
   grossTotal: number;
   baseComponent: number;
   extraDistanceComponent: number;
@@ -173,6 +179,7 @@ export interface PricingBreakdown {
   helperComponent: number;
   standardPlatformFee: number;
   basePayout: number;
+  evDiscountedFee: number;
   evBonus: number;
   evNetPayout: number;
   combustionPlatformFee: number;

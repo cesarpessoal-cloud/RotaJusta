@@ -49,6 +49,7 @@ import {
   PixPaymentMethod,
   Profile,
   Rating,
+  VehicleType,
 } from '../types';
 import { formatVehicleModelAndColor } from '../utils/courierIdentity';
 import { formatPaymentMethodLabel } from '../utils/pix';
@@ -56,8 +57,14 @@ import {
   calculatePricing,
   formatBRL,
   formatDateTimeBR,
-  isZeroFeePropulsion,
+  formatVehicleModalDisplayName,
+  getCompatibleVehiclesForOrderType,
+  getDefaultVehicleForOrderType,
+  getVehicleModalPricing,
+  hasCleanMobilityDiscount,
   PRICING_RULES,
+  PROGRESSIVE_PLATFORM_FEE_NOTE,
+  VEHICLE_MODAL_PRICING,
 } from '../utils/pricing';
 import {
   formatPickupCode,
@@ -77,6 +84,7 @@ import {
   PropulsionTag,
 } from './EvBadge';
 import { MapStopPoint, PortoAlegreMap } from './PortoAlegreMap';
+import { PixQrCodeSettlement } from './PixQrCodeSettlement';
 import { OrderRatingBox, RatingBadge } from './RatingWidgets';
 
 interface MerchantPanelProps {
@@ -157,6 +165,7 @@ export function MerchantPanel({
     initialFlowDirection
   );
   const [orderType, setOrderType] = useState<OrderType>('rapida');
+  const [requestedVehicle, setRequestedVehicle] = useState<VehicleType>('Moto');
   const [paymentMethod, setPaymentMethod] =
     useState<PixPaymentMethod>('pix_direto');
 
@@ -269,6 +278,9 @@ export function MerchantPanel({
   const [confirmingPayOrderId, setConfirmingPayOrderId] = useState<string | null>(
     null
   );
+  const [openPixQrOrderIds, setOpenPixQrOrderIds] = useState<
+    Record<string, boolean>
+  >({});
   const [photoModal, setPhotoModal] = useState<{
     src: string;
     caption: string;
@@ -295,13 +307,36 @@ export function MerchantPanel({
 
   const effectivePackageCount = orderType === 'rota' ? routeStops.length : 1;
 
+  const compatibleVehicles = useMemo(
+    () => getCompatibleVehiclesForOrderType(orderType),
+    [orderType]
+  );
+
+  const selectedModalRule = useMemo(
+    () => getVehicleModalPricing(requestedVehicle),
+    [requestedVehicle]
+  );
+
   const pricing = useMemo(
     () =>
-      calculatePricing(orderType, distanceKm, effectivePackageCount, {
-        cargoSize,
-        includeHelper,
-      }),
-    [orderType, distanceKm, effectivePackageCount, cargoSize, includeHelper]
+      calculatePricing(
+        orderType,
+        distanceKm,
+        effectivePackageCount,
+        {
+          cargoSize,
+          includeHelper,
+        },
+        requestedVehicle
+      ),
+    [
+      orderType,
+      distanceKm,
+      effectivePackageCount,
+      cargoSize,
+      includeHelper,
+      requestedVehicle,
+    ]
   );
 
   const recalculateDistanceFromEndpoints = (
@@ -407,6 +442,10 @@ export function MerchantPanel({
   const handleOrderTypeChange = (nextType: OrderType) => {
     setOrderType(nextType);
     setFormError('');
+    const allowed = getCompatibleVehiclesForOrderType(nextType);
+    if (!allowed.includes(requestedVehicle)) {
+      setRequestedVehicle(getDefaultVehicleForOrderType(nextType));
+    }
     if (nextType === 'frete' && !distanceAutoCalculated && distanceKm < 5) {
       setDistanceKm(6);
     }
@@ -739,6 +778,7 @@ export function MerchantPanel({
       id: newOrderId,
       code: formatPickupCode(newOrderId),
       type: orderType,
+      requestedVehicle,
       flowDirection,
       pickupSchedule,
       merchantId: activeMerchant?.id || '',
@@ -842,7 +882,8 @@ export function MerchantPanel({
             <strong className="font-semibold text-zinc-900">
               pequenos fretes de utilitário
             </strong>{' '}
-            com repasse transparente e taxa zerada para veículos elétricos.
+            com repasse transparente e 50% de desconto na taxa para bicicletas e
+            veículos elétricos.
           </p>
           <div className="pt-1 flex flex-wrap items-center gap-2">
             <span
@@ -1066,11 +1107,73 @@ export function MerchantPanel({
             </div>
             {orderType === 'frete' && (
               <p className="mt-2 text-xs text-sky-900 bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
-                <strong>Pequeno Frete (Utilitário / Mudança Rápida):</strong> base
-                mínima R$ 80,00 (até 5 km) + R$ 3,50/km adicional. Taxa fixa de R$ 3,00
-                (R$ 0,00 para utilitário elétrico).
+                <strong>Pequeno Frete (Utilitário / Fiorino):</strong> base
+                mínima {formatBRL(VEHICLE_MODAL_PRICING['Utilitário / Picape / Van'].baseFare)}{' '}
+                (até {VEHICLE_MODAL_PRICING['Utilitário / Picape / Van'].baseKm} km) +{' '}
+                {formatBRL(VEHICLE_MODAL_PRICING['Utilitário / Picape / Van'].perKmRate)}/km adicional.
+                Taxa operacional inicial de{' '}
+                {formatBRL(VEHICLE_MODAL_PRICING['Utilitário / Picape / Van'].initialPlatformFee)}.
               </p>
             )}
+          </div>
+
+          {/* Categoria de Veículo (Precificação Diferenciada por Modal) */}
+          <div className="space-y-2">
+            <div className="flex flex-col gap-0.5 sm:flex-row sm:items-center sm:justify-between">
+              <span className="block text-xs font-semibold text-zinc-700">
+                Categoria de Veículo (Tarifa e Taxa por Modal)
+              </span>
+              <span className="text-[11px] text-zinc-500">
+                Filtra automaticamente apenas entregadores compatíveis
+              </span>
+            </div>
+            <div
+              className={`grid grid-cols-1 gap-2 ${
+                compatibleVehicles.length === 1
+                  ? 'sm:grid-cols-1'
+                  : 'sm:grid-cols-3'
+              }`}
+            >
+              {compatibleVehicles.map((vType) => {
+                const rule = VEHICLE_MODAL_PRICING[vType];
+                const isSelected = requestedVehicle === vType;
+                return (
+                  <button
+                    key={vType}
+                    type="button"
+                    onClick={() => setRequestedVehicle(vType)}
+                    className={`rounded-xl border p-3 text-left transition-colors ${
+                      isSelected
+                        ? 'border-emerald-600 bg-emerald-50/70 text-emerald-950 shadow-2xs'
+                        : 'border-zinc-200 bg-white text-zinc-700 hover:bg-zinc-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold">{rule.label}</span>
+                      {isSelected && (
+                        <span className="rounded bg-emerald-600 px-1.5 py-0.5 text-[10px] font-bold uppercase text-white">
+                          Selecionado
+                        </span>
+                      )}
+                    </div>
+                    <p className="mt-1 font-mono text-[11px] text-zinc-600 tabular-nums">
+                      {orderType === 'rota'
+                        ? `${formatBRL(rule.rotaPerPackage)}/pacote · Taxa ${formatBRL(
+                            rule.rotaInitialPlatformFeePerPackage
+                          )}/pct`
+                        : `Base ${formatBRL(rule.baseFare)} (até ${rule.baseKm} km) + ${formatBRL(
+                            rule.perKmRate
+                          )}/km`}
+                    </p>
+                    {orderType !== 'rota' && (
+                      <p className="mt-0.5 font-mono text-[11px] text-emerald-800 tabular-nums">
+                        Taxa op. inicial: {formatBRL(rule.initialPlatformFee)}
+                      </p>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           {/* Visual Flow Direction Context Banner */}
@@ -1606,10 +1709,10 @@ export function MerchantPanel({
                 }`}
               >
                 <p className="text-xs font-semibold">
-                  Pix Direto ao Entregador (Recomendado para Bike/Elétrico - Taxa Zero)
+                  Pix Direto ao Entregador (Recomendado para Bike/Elétrico · -50% na Taxa)
                 </p>
                 <p className="mt-0.5 text-[11px] text-zinc-500">
-                  Você copia a Chave Pix do condutor ao aceitar e transfere na hora
+                  Pague via QR Code Pix, Copia e Cola ou Chave Pix direto ao condutor
                 </p>
               </button>
 
@@ -1672,28 +1775,36 @@ export function MerchantPanel({
           />
 
           <div className="rounded-xl border border-zinc-200 bg-white p-5 sm:p-6 space-y-5">
-            <div className="border-b border-zinc-100 pb-4">
-              <p className="text-xs font-medium text-emerald-700">
-                Transparência Financeira
-              </p>
-              <h3 className="font-display text-lg font-semibold text-zinc-900">
-                Resumo do Cálculo
-              </h3>
+            <div className="flex flex-wrap items-start justify-between gap-2 border-b border-zinc-100 pb-4">
+              <div>
+                <p className="text-xs font-medium text-emerald-700">
+                  Transparência Financeira · {selectedModalRule.label}
+                </p>
+                <h3 className="font-display text-lg font-semibold text-zinc-900">
+                  Resumo do Cálculo
+                </h3>
+              </div>
+              <span className="rounded-lg border border-zinc-200 bg-zinc-50 px-2.5 py-1 text-[11px] font-semibold text-zinc-800">
+                Modal: {selectedModalRule.shortLabel}
+              </span>
             </div>
 
             <div className="space-y-3 text-sm">
               {orderType === 'rapida' && (
                 <>
                   <div className="flex items-center justify-between text-zinc-600">
-                    <span>Tarifa base (até 3 km)</span>
+                    <span>
+                      Tarifa base {selectedModalRule.shortLabel} (até{' '}
+                      {pricing.baseKm} km)
+                    </span>
                     <span className="font-mono font-medium text-zinc-900 tabular-nums">
-                      {formatBRL(PRICING_RULES.RAPIDA_BASE)}
+                      {formatBRL(pricing.baseComponent)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-zinc-600">
                     <span>
                       Adicional ({pricing.extraKm.toLocaleString('pt-BR')} km ×{' '}
-                      {formatBRL(PRICING_RULES.RAPIDA_EXTRA_KM_RATE)})
+                      {formatBRL(pricing.perKmRate)}/km)
                     </span>
                     <span className="font-mono font-medium text-zinc-900 tabular-nums">
                       {formatBRL(pricing.extraDistanceComponent)}
@@ -1705,8 +1816,8 @@ export function MerchantPanel({
               {orderType === 'rota' && (
                 <div className="flex items-center justify-between text-zinc-600">
                   <span>
-                    {effectivePackageCount} paradas/pacotes ×{' '}
-                    {formatBRL(PRICING_RULES.ROTA_PER_PACKAGE)}
+                    {effectivePackageCount} paradas/pacotes ({selectedModalRule.shortLabel}) ×{' '}
+                    {formatBRL(pricing.perPackageRate)}
                   </span>
                   <span className="font-mono font-medium text-zinc-900 tabular-nums">
                     {formatBRL(pricing.grossTotal)}
@@ -1717,15 +1828,17 @@ export function MerchantPanel({
               {orderType === 'frete' && (
                 <>
                   <div className="flex items-center justify-between text-zinc-600">
-                    <span>Base utilitário (até 5 km)</span>
+                    <span>
+                      Base {selectedModalRule.shortLabel} (até {pricing.baseKm} km)
+                    </span>
                     <span className="font-mono font-medium text-zinc-900 tabular-nums">
-                      {formatBRL(PRICING_RULES.FRETE_BASE)}
+                      {formatBRL(pricing.baseComponent)}
                     </span>
                   </div>
                   <div className="flex items-center justify-between text-zinc-600">
                     <span>
                       Km adicional ({pricing.extraKm.toLocaleString('pt-BR')} km ×{' '}
-                      {formatBRL(PRICING_RULES.FRETE_EXTRA_KM_RATE)})
+                      {formatBRL(pricing.perKmRate)}/km)
                     </span>
                     <span className="font-mono font-medium text-zinc-900 tabular-nums">
                       {formatBRL(pricing.extraDistanceComponent)}
@@ -1748,60 +1861,96 @@ export function MerchantPanel({
                 </>
               )}
 
-              <div className="flex items-center justify-between border-t border-zinc-200 pt-3 font-semibold text-zinc-900">
-                <span>Valor do pedido (Lojista)</span>
-                <span className="font-mono text-lg tabular-nums">
-                  {formatBRL(pricing.grossTotal)}
+              <div className="space-y-2.5 border-t border-zinc-200 pt-3">
+                <div className="flex items-center justify-between font-semibold text-zinc-900">
+                  <span>Valor Total do Frete</span>
+                  <span className="font-mono text-lg tabular-nums">
+                    {formatBRL(pricing.grossTotal)}
+                  </span>
+                </div>
+
+                {requestedVehicle === 'Bike' ? (
+                  <>
+                    <div className="rounded-lg border border-emerald-200 bg-emerald-50/60 px-3.5 py-2.5 space-y-1.5">
+                      <div className="flex items-center justify-between text-xs text-zinc-600">
+                        <span>Taxa operacional padrão (combustão)</span>
+                        <span className="font-mono line-through tabular-nums">
+                          {formatBRL(pricing.standardPlatformFee)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-emerald-800">
+                        <span className="font-semibold">
+                          Desconto Bike / E-Bike (-50%)
+                        </span>
+                        <span className="font-mono font-semibold tabular-nums">
+                          -{formatBRL(pricing.evBonus)}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-zinc-900 border-t border-emerald-200/80 pt-1.5">
+                        <span className="font-semibold">
+                          Taxa Operacional com Desconto
+                        </span>
+                        <span className="font-mono font-bold text-emerald-800 tabular-nums">
+                          -{formatBRL(pricing.evDiscountedFee)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-snug text-zinc-600">
+                        {PROGRESSIVE_PLATFORM_FEE_NOTE}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-lg border border-emerald-300 bg-emerald-50 px-3.5 py-2.5">
+                      <span className="text-xs sm:text-sm font-bold text-emerald-950">
+                        Ganho Líquido do Entregador
+                      </span>
+                      <span className="font-mono text-base font-extrabold text-emerald-700 tabular-nums">
+                        {formatBRL(pricing.evNetPayout)}
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-3.5 py-2.5 space-y-1">
+                      <div className="flex items-center justify-between text-xs text-zinc-700">
+                        <span className="font-semibold">
+                          Taxa Operacional Inicial (Combustão)
+                        </span>
+                        <span className="font-mono font-semibold text-zinc-900 tabular-nums">
+                          -{formatBRL(pricing.standardPlatformFee)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] leading-snug text-zinc-500">
+                        {PROGRESSIVE_PLATFORM_FEE_NOTE}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center justify-between rounded-lg border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5">
+                      <span className="text-xs sm:text-sm font-bold text-emerald-950">
+                        Ganho Líquido do Entregador (Combustão)
+                      </span>
+                      <span className="font-mono text-base font-extrabold text-emerald-700 tabular-nums">
+                        {formatBRL(pricing.basePayout)}
+                      </span>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {requestedVehicle !== 'Bike' && (
+              <div className="rounded-lg border border-emerald-200/80 bg-emerald-50/40 px-3.5 py-2.5 text-[11px] text-emerald-900 flex items-start gap-2">
+                <Zap className="h-3.5 w-3.5 text-emerald-600 shrink-0 mt-0.5" aria-hidden="true" />
+                <span>
+                  <strong>Desconto 50% Mobilidade Elétrica:</strong> se aceito por veículo{' '}
+                  <strong>Elétrico</strong> (moto, ciclo ou carro elétrico), a taxa cai
+                  automaticamente em 50% para{' '}
+                  <strong className="font-mono">{formatBRL(pricing.evDiscountedFee)}</strong>{' '}
+                  (desconto de <strong className="font-mono">{formatBRL(pricing.evBonus)}</strong>),
+                  elevando o ganho líquido do entregador para{' '}
+                  <strong className="font-mono">{formatBRL(pricing.evNetPayout)}</strong>.
                 </span>
               </div>
-            </div>
-
-            <div className="space-y-3 pt-1">
-              <div className="rounded-lg border border-zinc-200 bg-zinc-50 p-4 space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-zinc-800">
-                    Se aceito por veículo a Combustão
-                  </span>
-                  <span className="text-xs text-zinc-500">Taxa fixa padrão</span>
-                </div>
-                <div className="flex items-center justify-between text-xs text-zinc-600">
-                  <span>Repasse líquido ao condutor</span>
-                  <span className="font-mono font-semibold text-zinc-900 tabular-nums">
-                    {formatBRL(pricing.combustionNetPayout)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs text-zinc-500">
-                  <span>Taxa fixa RotaJusta</span>
-                  <span className="font-mono tabular-nums">
-                    {formatBRL(pricing.combustionPlatformFee)}
-                  </span>
-                </div>
-              </div>
-
-              <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-4 space-y-2">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-900">
-                    <Zap className="h-3.5 w-3.5 text-emerald-600" aria-hidden="true" />
-                    Se aceito por Elétrico ou Bike
-                  </span>
-                  <span className="text-xs font-semibold text-emerald-700">
-                    Taxa R$ 0,00
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs text-emerald-900">
-                  <span>Repasse base + 100% Bônus EV</span>
-                  <span className="font-mono text-sm font-bold text-emerald-800 tabular-nums">
-                    {formatBRL(pricing.evNetPayout)}
-                  </span>
-                </div>
-                <div className="flex items-center justify-between text-xs text-emerald-700">
-                  <span>Bônus de incentivo elétrico revertido</span>
-                  <span className="font-mono font-medium tabular-nums">
-                    +{formatBRL(pricing.evBonus)}
-                  </span>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         </aside>
       </section>
@@ -1895,6 +2044,11 @@ export function MerchantPanel({
                               : `Rota Consolidada (${order.packageCount} pacotes)`}
                           </span>
                         )}
+                        {order.requestedVehicle && (
+                          <span className="rounded bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 text-[11px] font-semibold text-zinc-800">
+                            {formatVehicleModalDisplayName(order.requestedVehicle)}
+                          </span>
+                        )}
                         {order.flowDirection === 'receber' && (
                           <span className="rounded bg-sky-50 border border-sky-200 px-1.5 py-0.5 text-[11px] font-semibold text-sky-800">
                             Receber Item
@@ -1951,7 +2105,10 @@ export function MerchantPanel({
                             count={order.assignedCourierRatingCount}
                             compact
                           />
-                          <PropulsionTag propulsion={order.assignedCourierPropulsion} />
+                          <PropulsionTag
+                            propulsion={order.assignedCourierPropulsion}
+                            vehicleType={order.assignedCourierVehicleType}
+                          />
                           <span aria-hidden="true">·</span>
                           <span className="font-mono tabular-nums">
                             {deliveredStops}/{order.stops.length} paradas concluídas
@@ -1966,10 +2123,20 @@ export function MerchantPanel({
                           {formatBRL(order.grossTotal)}
                         </p>
                         <p className="text-xs text-zinc-500 font-mono tabular-nums">
-                          {isZeroFeePropulsion(order.assignedCourierPropulsion)
-                            ? `Taxa R$ 0,00 · Bônus +${formatBRL(order.standardPlatformFee)}`
-                            : `Repasse ${formatBRL(order.basePayout)} · Taxa ${formatBRL(
-                                order.standardPlatformFee
+                          {hasCleanMobilityDiscount(
+                            order.assignedCourierPropulsion,
+                            order.assignedCourierVehicleType
+                          )
+                            ? `Líquido ${formatBRL(
+                                order.netCourierPayout ?? order.basePayout
+                              )} · Taxa ${formatBRL(
+                                order.appliedPlatformFee ??
+                                  Number((order.standardPlatformFee * 0.5).toFixed(2))
+                              )} (-50%)`
+                            : `Repasse ${formatBRL(
+                                order.netCourierPayout ?? order.basePayout
+                              )} · Taxa ${formatBRL(
+                                order.appliedPlatformFee ?? order.standardPlatformFee
                               )}`}
                         </p>
                       </div>
@@ -2192,196 +2359,270 @@ export function MerchantPanel({
                   )}
 
                   {/* Financial Pix Card when order is accepted (Em Rota / Entregue) */}
-                  {order.status !== 'Aguardando' && (
-                    <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
-                      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-emerald-200/60 pb-2.5">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <QrCode
-                            className="h-4 w-4 text-emerald-700 shrink-0"
-                            aria-hidden="true"
-                          />
-                          <span className="text-xs font-semibold text-zinc-900">
-                            Pagamento Pix ·{' '}
-                            {formatPaymentMethodLabel(order.paymentMethod)}
-                          </span>
-                        </div>
-                        <PaymentStatusBadge status={order.paymentStatus} compact />
-                      </div>
+                  {order.status !== 'Aguardando' && (() => {
+                    const hasOrderDiscount = hasCleanMobilityDiscount(
+                      order.assignedCourierPropulsion,
+                      order.assignedCourierVehicleType
+                    );
+                    const appliedFee =
+                      order.appliedPlatformFee ??
+                      (hasOrderDiscount
+                        ? Number((order.standardPlatformFee * 0.5).toFixed(2))
+                        : order.standardPlatformFee);
+                    const netCourierValue =
+                      order.netCourierPayout ??
+                      Number((order.grossTotal - appliedFee).toFixed(2));
+                    const isPlatformPix = order.paymentMethod === 'pix_plataforma';
+                    const settlementPixKey = isPlatformPix
+                      ? platformPixKey
+                      : order.assignedCourierPixKey;
+                    const settlementAmount = isPlatformPix
+                      ? order.grossTotal
+                      : netCourierValue;
+                    const settlementRecipient = isPlatformPix
+                      ? 'RotaJusta Porto Alegre'
+                      : order.assignedCourierName || 'Entregador';
+                    const isQrVisible =
+                      openPixQrOrderIds[order.id] ??
+                      (!order.paymentStatus ||
+                        order.paymentStatus === 'pendente_pagamento');
 
-                      <div className="grid grid-cols-3 gap-3 text-xs">
-                        <div>
-                          <span className="text-zinc-500 block">Valor Total</span>
-                          <strong className="font-mono text-sm font-bold text-zinc-900 tabular-nums">
-                            {formatBRL(order.grossTotal)}
-                          </strong>
+                    return (
+                      <div className="mt-4 rounded-xl border border-emerald-200 bg-emerald-50/40 p-4 space-y-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-b border-emerald-200/60 pb-2.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <QrCode
+                              className="h-4 w-4 text-emerald-700 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span className="text-xs font-semibold text-zinc-900">
+                              Pagamento Pix ({order.code}) ·{' '}
+                              {formatPaymentMethodLabel(order.paymentMethod)}
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenPixQrOrderIds((prev) => ({
+                                  ...prev,
+                                  [order.id]: !isQrVisible,
+                                }))
+                              }
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-[11px] font-semibold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap"
+                            >
+                              <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>
+                                {isQrVisible
+                                  ? 'Ocultar QR Code Pix'
+                                  : 'Pagar via QR Code Pix'}
+                              </span>
+                            </button>
+                            <PaymentStatusBadge status={order.paymentStatus} compact />
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-zinc-500 block">
-                            Valor do Entregador
-                          </span>
-                          <strong className="font-mono text-sm font-bold text-emerald-700 tabular-nums">
-                            {formatBRL(order.netCourierPayout ?? order.basePayout)}
-                          </strong>
-                        </div>
-                        <div>
-                          <span className="text-zinc-500 block">
-                            Taxa da Plataforma
-                          </span>
-                          <strong className="font-mono text-sm font-semibold text-zinc-900 tabular-nums">
-                            {formatBRL(
-                              order.appliedPlatformFee ?? order.standardPlatformFee
-                            )}
-                          </strong>
-                        </div>
-                      </div>
 
-                      {order.paymentMethod !== 'pix_plataforma' ? (
-                        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-xs">
-                          <div className="space-y-0.5">
-                            <p className="text-zinc-600">
-                              Entregador:{' '}
-                              <strong className="text-zinc-900">
-                                {order.assignedCourierName || 'Condutor'}
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                          <div>
+                            <span className="text-zinc-500 block">Valor Total</span>
+                            <strong className="font-mono text-sm font-bold text-zinc-900 tabular-nums">
+                              {formatBRL(order.grossTotal)}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 block">
+                              Ganho Líquido do Entregador
+                            </span>
+                            <strong className="font-mono text-sm font-bold text-emerald-700 tabular-nums">
+                              {formatBRL(netCourierValue)}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-zinc-500 block">
+                              {hasOrderDiscount
+                                ? 'Taxa Operacional (-50% Bike/EV)'
+                                : 'Taxa Operacional Inicial'}
+                            </span>
+                            <div className="flex flex-wrap items-baseline gap-1.5">
+                              {hasOrderDiscount && (
+                                <span className="font-mono text-xs text-zinc-400 line-through tabular-nums">
+                                  {formatBRL(order.standardPlatformFee)}
+                                </span>
+                              )}
+                              <strong className="font-mono text-sm font-semibold text-zinc-900 tabular-nums">
+                                {formatBRL(appliedFee)}
                               </strong>
-                            </p>
-                            <p className="text-zinc-600">
-                              Chave Pix:{' '}
-                              {order.assignedCourierPixKey ? (
-                                <code className="font-mono font-semibold text-zinc-900">
-                                  {order.assignedCourierPixKey}
-                                </code>
-                              ) : (
-                                <span className="text-amber-700 font-medium">
-                                  Chave Pix ainda não cadastrada pelo entregador
-                                </span>
-                              )}
-                            </p>
-                          </div>
-
-                          <div className="flex flex-wrap items-center gap-2 shrink-0">
-                            {order.assignedCourierPixKey && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void handleCopyPixKey(
-                                    order.id,
-                                    order.assignedCourierPixKey!
-                                  )
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 whitespace-nowrap"
-                              >
-                                {copiedOrderId === order.id ? (
-                                  <>
-                                    <Check
-                                      className="h-3.5 w-3.5 text-emerald-600"
-                                      aria-hidden="true"
-                                    />
-                                    <span>Chave Copiada</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                                    <span>Copiar Chave Pix do Entregador</span>
-                                  </>
-                                )}
-                              </button>
-                            )}
-
-                            {(!order.paymentStatus ||
-                              order.paymentStatus === 'pendente_pagamento') && (
-                              <button
-                                type="button"
-                                disabled={confirmingPayOrderId === order.id}
-                                onClick={() =>
-                                  void handleConfirmPixClick(order.id)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
-                              >
-                                <CheckCircle2
-                                  className="h-3.5 w-3.5"
-                                  aria-hidden="true"
-                                />
-                                <span>
-                                  {confirmingPayOrderId === order.id
-                                    ? 'Confirmando...'
-                                    : 'Confirmar Pix Realizado'}
-                                </span>
-                              </button>
-                            )}
+                            </div>
+                            <span className="block text-[10px] text-zinc-500 mt-0.5">
+                              {hasOrderDiscount
+                                ? 'Desconto automático de 50% aplicado (Bike/Elétrico)'
+                                : 'Reduz progressivamente conforme o volume da rede cresce'}
+                            </span>
                           </div>
                         </div>
-                      ) : (
-                        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-xs">
-                          <div className="space-y-0.5">
-                            <p className="text-zinc-600">
-                              Chave Pix Oficial{' '}
-                              <strong className="text-zinc-900">RotaJusta</strong>:
-                            </p>
-                            <p>
-                              {platformPixKey ? (
-                                <code className="font-mono font-semibold text-zinc-900">
-                                  {platformPixKey}
-                                </code>
-                              ) : (
-                                <span className="text-amber-700 font-medium">
-                                  Chave oficial ainda não configurada no Admin
-                                </span>
-                              )}
-                            </p>
-                          </div>
 
-                          <div className="flex flex-wrap items-center gap-2 shrink-0">
-                            {platformPixKey && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  void handleCopyPixKey(order.id, platformPixKey)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 whitespace-nowrap"
-                              >
-                                {copiedOrderId === order.id ? (
-                                  <>
-                                    <Check
-                                      className="h-3.5 w-3.5 text-emerald-600"
-                                      aria-hidden="true"
-                                    />
-                                    <span>Chave Copiada</span>
-                                  </>
+                        {isQrVisible && (
+                          <PixQrCodeSettlement
+                            orderCode={order.code}
+                            amount={settlementAmount}
+                            recipientName={settlementRecipient}
+                            pixKey={settlementPixKey}
+                            paymentStatus={order.paymentStatus}
+                            viewerRole="merchant"
+                            isConfirming={confirmingPayOrderId === order.id}
+                            onConfirmAction={() => handleConfirmPixClick(order.id)}
+                            confirmButtonLabel="Confirmar Pagamento Enviado"
+                          />
+                        )}
+
+                        {!isPlatformPix ? (
+                          <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-xs">
+                            <div className="space-y-0.5">
+                              <p className="text-zinc-600">
+                                Entregador:{' '}
+                                <strong className="text-zinc-900">
+                                  {order.assignedCourierName || 'Condutor'}
+                                </strong>
+                              </p>
+                              <p className="text-zinc-600">
+                                Chave Pix:{' '}
+                                {order.assignedCourierPixKey ? (
+                                  <code className="font-mono font-semibold text-zinc-900">
+                                    {order.assignedCourierPixKey}
+                                  </code>
                                 ) : (
-                                  <>
-                                    <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                                    <span>Copiar Chave Pix</span>
-                                  </>
+                                  <span className="text-amber-700 font-medium">
+                                    Chave Pix ainda não cadastrada pelo entregador
+                                  </span>
                                 )}
-                              </button>
-                            )}
+                              </p>
+                            </div>
 
-                            {(!order.paymentStatus ||
-                              order.paymentStatus === 'pendente_pagamento') && (
-                              <button
-                                type="button"
-                                disabled={confirmingPayOrderId === order.id}
-                                onClick={() =>
-                                  void handleConfirmPixClick(order.id)
-                                }
-                                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
-                              >
-                                <CheckCircle2
-                                  className="h-3.5 w-3.5"
-                                  aria-hidden="true"
-                                />
-                                <span>
-                                  {confirmingPayOrderId === order.id
-                                    ? 'Confirmando...'
-                                    : 'Confirmar Pagamento'}
-                                </span>
-                              </button>
-                            )}
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              {order.assignedCourierPixKey && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void handleCopyPixKey(
+                                      order.id,
+                                      order.assignedCourierPixKey!
+                                    )
+                                  }
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 whitespace-nowrap"
+                                >
+                                  {copiedOrderId === order.id ? (
+                                    <>
+                                      <Check
+                                        className="h-3.5 w-3.5 text-emerald-600"
+                                        aria-hidden="true"
+                                      />
+                                      <span>Chave Copiada</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                                      <span>Copiar Chave Pix do Entregador</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
+
+                              {(!order.paymentStatus ||
+                                order.paymentStatus === 'pendente_pagamento') && (
+                                <button
+                                  type="button"
+                                  disabled={confirmingPayOrderId === order.id}
+                                  onClick={() =>
+                                    void handleConfirmPixClick(order.id)
+                                  }
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
+                                >
+                                  <CheckCircle2
+                                    className="h-3.5 w-3.5"
+                                    aria-hidden="true"
+                                  />
+                                  <span>
+                                    {confirmingPayOrderId === order.id
+                                      ? 'Confirmando...'
+                                      : 'Confirmar Pix Realizado'}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                        ) : (
+                          <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between rounded-lg border border-zinc-200 bg-white px-3.5 py-2.5 text-xs">
+                            <div className="space-y-0.5">
+                              <p className="text-zinc-600">
+                                Chave Pix Oficial{' '}
+                                <strong className="text-zinc-900">RotaJusta</strong>:
+                              </p>
+                              <p>
+                                {platformPixKey ? (
+                                  <code className="font-mono font-semibold text-zinc-900">
+                                    {platformPixKey}
+                                  </code>
+                                ) : (
+                                  <span className="text-amber-700 font-medium">
+                                    Chave oficial ainda não configurada no Admin
+                                  </span>
+                                )}
+                              </p>
+                            </div>
+
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
+                              {platformPixKey && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void handleCopyPixKey(order.id, platformPixKey)
+                                  }
+                                  className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-xs font-semibold text-zinc-800 hover:bg-zinc-50 whitespace-nowrap"
+                                >
+                                  {copiedOrderId === order.id ? (
+                                    <>
+                                      <Check
+                                        className="h-3.5 w-3.5 text-emerald-600"
+                                        aria-hidden="true"
+                                      />
+                                      <span>Chave Copiada</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+                                      <span>Copiar Chave Pix</span>
+                                    </>
+                                  )}
+                                </button>
+                              )}
+
+                              {(!order.paymentStatus ||
+                                order.paymentStatus === 'pendente_pagamento') && (
+                                <button
+                                  type="button"
+                                  disabled={confirmingPayOrderId === order.id}
+                                  onClick={() =>
+                                    void handleConfirmPixClick(order.id)
+                                  }
+                                  className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
+                                >
+                                  <CheckCircle2
+                                    className="h-3.5 w-3.5"
+                                    aria-hidden="true"
+                                  />
+                                  <span>
+                                    {confirmingPayOrderId === order.id
+                                      ? 'Confirmando...'
+                                      : 'Confirmar Pagamento'}
+                                  </span>
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   {/* Mutual Rating Box after Delivery Completed */}
                   {order.status === 'Entregue' && (
@@ -2507,15 +2748,18 @@ export function MerchantPanel({
                             )}
                           </div>
                         ))}
-                        {isZeroFeePropulsion(order.assignedCourierPropulsion) && (
+                        {hasCleanMobilityDiscount(
+                          order.assignedCourierPropulsion,
+                          order.assignedCourierVehicleType
+                        ) && (
                           <div className="pt-1 flex items-center gap-2 text-xs text-emerald-700">
                             <EvBadge
                               compact
                               propulsion={order.assignedCourierPropulsion}
                             />
                             <span>
-                              100% da taxa foi revertida como incentivo de mobilidade
-                              limpa.
+                              Desconto automático de 50% aplicado na taxa operacional
+                              da plataforma.
                             </span>
                           </div>
                         )}

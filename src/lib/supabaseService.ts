@@ -317,6 +317,36 @@ function normalizeStopFromRow(
   };
 }
 
+function encodeVehicleTag(vehicleType?: VehicleType): string | null {
+  switch (vehicleType) {
+    case 'Bike':
+      return 'bike';
+    case 'Moto':
+      return 'moto';
+    case 'Carro Pequeno (Passeio)':
+      return 'carro';
+    case 'Utilitário / Picape / Van':
+      return 'utilitario';
+    default:
+      return null;
+  }
+}
+
+function decodeVehicleTag(tag?: string): VehicleType | undefined {
+  switch ((tag || '').toLowerCase()) {
+    case 'bike':
+      return 'Bike';
+    case 'moto':
+      return 'Moto';
+    case 'carro':
+      return 'Carro Pequeno (Passeio)';
+    case 'utilitario':
+      return 'Utilitário / Picape / Van';
+    default:
+      return undefined;
+  }
+}
+
 function normalizeOrderFromRows(
   row: DbDeliveryRow,
   stopRows: DbDeliveryStopRow[],
@@ -339,6 +369,10 @@ function normalizeOrderFromRows(
     row.cargo_size === 'grande' ? 'grande' : 'medio';
   const includeHelper = Boolean(row.has_helper);
 
+  const rawSource = row.source_channel || 'Lojista Porto Alegre';
+  const vehMatch = rawSource.match(/\[VEH:(bike|moto|carro|utilitario)\]/i);
+  const extractedVehicle = decodeVehicleTag(vehMatch?.[1]);
+
   const computedPricing = calculatePricing(
     row.type,
     row.distance_km ?? 1,
@@ -346,7 +380,8 @@ function normalizeOrderFromRows(
     {
       cargoSize,
       includeHelper,
-    }
+    },
+    extractedVehicle
   );
 
   const orderStatus = mapDbStatusToOrderStatus(row.status);
@@ -370,7 +405,6 @@ function normalizeOrderFromRows(
         )
       : undefined;
 
-  const rawSource = row.source_channel || 'Lojista Porto Alegre';
   const hasPlatformTag = rawSource.includes('[PIX:plataforma]');
   const uidMatch = rawSource.match(/\[UID:([a-zA-Z0-9-]+)\]/);
   const extractedMerchantId = uidMatch?.[1] || '';
@@ -428,6 +462,7 @@ function normalizeOrderFromRows(
       .replace(/\s*\[PIX:(?:plataforma|direto)\]/g, '')
       .replace(/\s*\[UID:[a-zA-Z0-9-]+\]/g, '')
       .replace(/\s*\[DIR:(?:enviar|receber)\]/g, '')
+      .replace(/\s*\[VEH:(?:bike|moto|carro|utilitario)\]/gi, '')
       .replace(/\s*\[AGD:[^\]]*\]/g, '')
       .replace(/\s*\[AVISO:[^\]]*\]/g, '')
       .trim() || 'Lojista Porto Alegre';
@@ -467,6 +502,7 @@ function normalizeOrderFromRows(
     id: row.id,
     code: formatDeliveryCode(row.id),
     type: row.type,
+    requestedVehicle: extractedVehicle,
     flowDirection: extractedFlowDirection,
     pickupSchedule: extractedSchedule,
     merchantId: merchantProfile?.id || extractedMerchantId || '',
@@ -1771,6 +1807,10 @@ export async function createDeliveryInSupabase(order: Order): Promise<Order> {
     sourceTags.push('[DIR:receber]');
   } else if (order.flowDirection === 'enviar') {
     sourceTags.push('[DIR:enviar]');
+  }
+  const vehicleTag = encodeVehicleTag(order.requestedVehicle);
+  if (vehicleTag) {
+    sourceTags.push(`[VEH:${vehicleTag}]`);
   }
   if (
     order.pickupSchedule &&

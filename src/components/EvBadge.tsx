@@ -13,8 +13,9 @@ import {
   OrderStatus,
   PaymentStatus,
   PropulsionType,
+  VehicleType,
 } from '../types';
-import { isZeroFeePropulsion } from '../utils/pricing';
+import { hasCleanMobilityDiscount } from '../utils/pricing';
 
 export function FreightBadge({ compact = false }: { compact?: boolean }) {
   return (
@@ -40,10 +41,10 @@ export function EvBadge({
   const isEBike = propulsion === 'Elétrica / Pedal Assistido (E-Bike)';
 
   const label = isHumanBike
-    ? 'Bike · Taxa Zero'
+    ? 'Bike · -50% Taxa'
     : isEBike
-    ? 'E-Bike · Bônus EV'
-    : 'Elétrico · Bônus EV';
+    ? 'E-Bike · -50% Taxa'
+    : 'Elétrico · -50% Taxa';
 
   return (
     <span
@@ -61,10 +62,26 @@ export function EvBadge({
   );
 }
 
-export function PropulsionTag({ propulsion }: { propulsion?: PropulsionType }) {
-  if (!propulsion) return null;
-  if (isZeroFeePropulsion(propulsion)) {
-    return <EvBadge compact propulsion={propulsion} />;
+export function PropulsionTag({
+  propulsion,
+  vehicleType,
+}: {
+  propulsion?: PropulsionType;
+  vehicleType?: VehicleType;
+}) {
+  if (!propulsion && vehicleType !== 'Bike') return null;
+  if (hasCleanMobilityDiscount(propulsion, vehicleType)) {
+    return (
+      <EvBadge
+        compact
+        propulsion={
+          propulsion ||
+          (vehicleType === 'Bike'
+            ? 'Propulsão Humana (Convencional)'
+            : undefined)
+        }
+      />
+    );
   }
   return (
     <span className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-700 whitespace-nowrap shrink-0">

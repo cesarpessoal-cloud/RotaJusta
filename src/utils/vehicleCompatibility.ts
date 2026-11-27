@@ -60,8 +60,15 @@ export function isOrderCompatibleWithVehicle(
   orderType: OrderType,
   vehicleType?: VehicleType,
   orderDistanceKm?: number,
-  bikeMaxRadiusKm?: number | null
+  bikeMaxRadiusKm?: number | null,
+  requestedVehicle?: VehicleType
 ): boolean {
+  if (!vehicleType) {
+    return false;
+  }
+  if (requestedVehicle && requestedVehicle !== vehicleType) {
+    return false;
+  }
   if (orderType === 'frete') {
     return vehicleType === 'Utilitário / Picape / Van';
   }
@@ -102,7 +109,8 @@ export function sortCompatibleOrdersForVehicle(
       order.type,
       vehicleType,
       order.distanceKm,
-      bikeMaxRadiusKm
+      bikeMaxRadiusKm,
+      order.requestedVehicle
     )
   );
 

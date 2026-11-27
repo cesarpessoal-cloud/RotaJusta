@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2, Search } from 'lucide-react';
 import { VehicleType } from '../types';
 import { formatPlateInput } from '../utils/courierIdentity';
 import {
@@ -44,22 +44,21 @@ export function FipeVehicleFields({
   const fipeGroup = getFipeGroupForVehicleType(vehicleType);
   const isBike = vehicleType === 'Bike';
 
-  // Bike state
+  // Bike standardized options state
   const [bikeOption, setBikeOption] = useState<string>(() => {
     const clean = vehicleModel.trim();
     if (!clean) return '';
-    return BIKE_STANDARD_MODELS.includes(
-      clean as (typeof BIKE_STANDARD_MODELS)[number]
-    )
-      ? clean
-      : CUSTOM_MODEL_OPTION_VALUE;
+    const match = BIKE_STANDARD_MODELS.find(
+      (opt) => opt.toLowerCase() === clean.toLowerCase()
+    );
+    return match || CUSTOM_MODEL_OPTION_VALUE;
   });
   const [customBikeInput, setCustomBikeInput] = useState<string>(() => {
     const clean = vehicleModel.trim();
     if (
       clean &&
-      !BIKE_STANDARD_MODELS.includes(
-        clean as (typeof BIKE_STANDARD_MODELS)[number]
+      !BIKE_STANDARD_MODELS.some(
+        (opt) => opt.toLowerCase() === clean.toLowerCase()
       )
     ) {
       return clean;
@@ -67,19 +66,20 @@ export function FipeVehicleFields({
     return '';
   });
 
-  // FIPE Brands & Models state
+  // Campo 2 (Marca / Fabricante) & Campo 3 (Modelo) states
   const [brands, setBrands] = useState<FipeBrand[]>([]);
+  const [brandSearch, setBrandSearch] = useState<string>('');
   const [isLoadingBrands, setIsLoadingBrands] = useState(false);
-  const [fipeBrandsError, setFipeBrandsError] = useState<string | null>(null);
+  const [brandsUsingFallback, setBrandsUsingFallback] = useState(false);
   const [selectedBrandCode, setSelectedBrandCode] = useState<string>('');
 
   const [models, setModels] = useState<FipeModel[]>([]);
   const [isLoadingModels, setIsLoadingModels] = useState(false);
-  const [fipeModelsError, setFipeModelsError] = useState<string | null>(null);
+  const [modelsUsingFallback, setModelsUsingFallback] = useState(false);
   const [selectedModelName, setSelectedModelName] = useState<string>('');
   const [customManualModel, setCustomManualModel] = useState<string>('');
 
-  // Color state
+  // Campo 4 (Cor do Veículo) state
   const initialColor = matchStandardColorOption(vehicleColor);
   const [colorOption, setColorOption] = useState<string>(
     initialColor.selectedOption
@@ -88,19 +88,18 @@ export function FipeVehicleFields({
     initialColor.customColor
   );
 
-  // Track last synced external vehicleModel & vehicleType so re-opening edit modals stays in sync
   const lastVehicleTypeRef = useRef<VehicleType>(vehicleType);
   const latestModelRef = useRef<string>(vehicleModel);
   latestModelRef.current = vehicleModel;
 
-  // Sync external color updates (e.g. when selecting another user in AdminPanel)
+  // Keep Color dropdown synced when editing different users
   useEffect(() => {
     const matched = matchStandardColorOption(vehicleColor);
     setColorOption(matched.selectedOption);
     setCustomColorInput(matched.customColor);
   }, [vehicleColor]);
 
-  // Sync Bike selection when vehicleType is Bike or external model changes
+  // Keep Bike selection synced
   useEffect(() => {
     if (!isBike) return;
     const clean = vehicleModel.trim();
@@ -121,7 +120,7 @@ export function FipeVehicleFields({
     }
   }, [isBike, vehicleModel]);
 
-  // Reset selections cleanly when switching between Moto / Carro / Bike
+  // Reset Brand/Model dropdowns when switching between Moto / Carro / Bike
   useEffect(() => {
     if (lastVehicleTypeRef.current !== vehicleType) {
       const prevGroup = getFipeGroupForVehicleType(lastVehicleTypeRef.current);
@@ -130,6 +129,7 @@ export function FipeVehicleFields({
 
       if (prevGroup !== nextGroup) {
         setSelectedBrandCode('');
+        setBrandSearch('');
         setModels([]);
         setSelectedModelName('');
         setCustomManualModel('');
@@ -137,30 +137,29 @@ export function FipeVehicleFields({
     }
   }, [vehicleType]);
 
-  // Load FIPE brands for Moto or Carros
+  // Load FIPE v2 Brands (with instant local fallback after <= 3s)
   useEffect(() => {
     if (!fipeGroup) {
       setBrands([]);
       setIsLoadingBrands(false);
-      setFipeBrandsError(null);
+      setBrandsUsingFallback(false);
       return;
     }
 
     let cancelled = false;
     setIsLoadingBrands(true);
-    setFipeBrandsError(null);
 
     fetchFipeBrands(fipeGroup)
-      .then((list) => {
+      .then(({ brands: list, usedFallback }) => {
         if (cancelled) return;
         setBrands(list);
+        setBrandsUsingFallback(usedFallback);
 
-        // Try to match an existing saved vehicleModel (e.g. "Honda CG 160 Titan") to a FIPE brand
         const existing = latestModelRef.current.trim();
         if (existing) {
           const matchedBrand = list.find((b) => {
-            const rawLower = b.nome.trim().toLowerCase();
-            const fmtLower = formatFipeBrandLabel(b.nome).toLowerCase();
+            const rawLower = b.name.trim().toLowerCase();
+            const fmtLower = formatFipeBrandLabel(b.name).toLowerCase();
             const exLower = existing.toLowerCase();
             return (
               exLower === rawLower ||
@@ -170,22 +169,11 @@ export function FipeVehicleFields({
             );
           });
           if (matchedBrand) {
-            setSelectedBrandCode(matchedBrand.codigo);
+            setSelectedBrandCode(matchedBrand.code);
           } else {
             setSelectedBrandCode(CUSTOM_MODEL_OPTION_VALUE);
             setCustomManualModel(existing);
           }
-        }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setBrands([]);
-        setFipeBrandsError(
-          'Tabela FIPE temporariamente indisponível. Use "Outro modelo (digitar)".'
-        );
-        if (latestModelRef.current.trim()) {
-          setSelectedBrandCode(CUSTOM_MODEL_OPTION_VALUE);
-          setCustomManualModel(latestModelRef.current.trim());
         }
       })
       .finally(() => {
@@ -197,43 +185,51 @@ export function FipeVehicleFields({
     };
   }, [fipeGroup]);
 
-  // Load FIPE models whenever selectedBrandCode changes
+  const selectedBrandObj = useMemo(
+    () => brands.find((b) => b.code === selectedBrandCode) || null,
+    [brands, selectedBrandCode]
+  );
+
+  // Load FIPE v2 Models when Brand is selected (with instant local fallback after <= 3s)
   useEffect(() => {
     if (
       !fipeGroup ||
       !selectedBrandCode ||
-      selectedBrandCode === CUSTOM_MODEL_OPTION_VALUE
+      selectedBrandCode === CUSTOM_MODEL_OPTION_VALUE ||
+      !selectedBrandObj
     ) {
       setModels([]);
       setIsLoadingModels(false);
-      setFipeModelsError(null);
+      setModelsUsingFallback(false);
       return;
     }
 
     let cancelled = false;
     setIsLoadingModels(true);
-    setFipeModelsError(null);
 
-    fetchFipeModels(fipeGroup, selectedBrandCode)
-      .then((list) => {
+    fetchFipeModels(fipeGroup, selectedBrandCode, selectedBrandObj.name)
+      .then(({ models: list, usedFallback }) => {
         if (cancelled) return;
         setModels(list);
+        setModelsUsingFallback(usedFallback);
 
         const existing = latestModelRef.current.trim();
-        const brandObj = brands.find((b) => b.codigo === selectedBrandCode);
-        if (existing && brandObj) {
+        if (existing) {
           const exactModel = list.find(
             (m) =>
-              combineFipeBrandAndModel(brandObj.nome, m.nome).toLowerCase() ===
-                existing.toLowerCase() ||
-              m.nome.trim().toLowerCase() === existing.toLowerCase()
+              combineFipeBrandAndModel(
+                selectedBrandObj.name,
+                m.name
+              ).toLowerCase() === existing.toLowerCase() ||
+              m.name.trim().toLowerCase() === existing.toLowerCase()
           );
           if (exactModel) {
-            setSelectedModelName(exactModel.nome);
+            setSelectedModelName(exactModel.name);
           } else {
-            // Check if existing starts with brand name -> prefill manual remainder or full string
-            const rawPrefix = `${brandObj.nome.trim()} `;
-            const fmtPrefix = `${formatFipeBrandLabel(brandObj.nome)} `;
+            const rawPrefix = `${selectedBrandObj.name.trim()} `;
+            const fmtPrefix = `${formatFipeBrandLabel(
+              selectedBrandObj.name
+            )} `;
             let stripped = existing;
             if (existing.toLowerCase().startsWith(fmtPrefix.toLowerCase())) {
               stripped = existing.slice(fmtPrefix.length).trim();
@@ -242,25 +238,21 @@ export function FipeVehicleFields({
             ) {
               stripped = existing.slice(rawPrefix.length).trim();
             }
-            // If stripped matches any FIPE model by prefix/equality, pick it; else fallback to manual
             const closeMatch = list.find(
-              (m) => m.nome.trim().toLowerCase() === stripped.toLowerCase()
+              (m) => m.name.trim().toLowerCase() === stripped.toLowerCase()
             );
             if (closeMatch) {
-              setSelectedModelName(closeMatch.nome);
-            } else if (stripped && stripped.toLowerCase() !== brandObj.nome.trim().toLowerCase()) {
+              setSelectedModelName(closeMatch.name);
+            } else if (
+              stripped &&
+              stripped.toLowerCase() !==
+                selectedBrandObj.name.trim().toLowerCase()
+            ) {
               setSelectedModelName(CUSTOM_MODEL_OPTION_VALUE);
               setCustomManualModel(existing);
             }
           }
         }
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setModels([]);
-        setFipeModelsError(
-          'Não foi possível carregar os modelos FIPE. Selecione "Outro modelo (digitar)".'
-        );
       })
       .finally(() => {
         if (!cancelled) setIsLoadingModels(false);
@@ -269,7 +261,16 @@ export function FipeVehicleFields({
     return () => {
       cancelled = true;
     };
-  }, [fipeGroup, selectedBrandCode, brands]);
+  }, [fipeGroup, selectedBrandCode, selectedBrandObj]);
+
+  const filteredBrands = useMemo(() => {
+    const q = brandSearch.trim().toLowerCase();
+    if (!q) return brands;
+    return brands.filter((b) => {
+      const label = formatFipeBrandLabel(b.name).toLowerCase();
+      return label.includes(q) || b.name.toLowerCase().includes(q);
+    });
+  }, [brands, brandSearch]);
 
   const handleBrandSelectChange = (nextCode: string) => {
     setSelectedBrandCode(nextCode);
@@ -284,17 +285,17 @@ export function FipeVehicleFields({
       onChangeVehicleModel('');
       return;
     }
-    // Clear model until user chooses one from the brand's model dropdown
     onChangeVehicleModel('');
   };
 
   const handleModelSelectChange = (nextModel: string) => {
     setSelectedModelName(nextModel);
     if (nextModel === CUSTOM_MODEL_OPTION_VALUE) {
-      const brandObj = brands.find((b) => b.codigo === selectedBrandCode);
       const prefill =
         customManualModel.trim() ||
-        (brandObj ? `${formatFipeBrandLabel(brandObj.nome)} ` : '');
+        (selectedBrandObj
+          ? `${formatFipeBrandLabel(selectedBrandObj.name)} `
+          : '');
       setCustomManualModel(prefill);
       onChangeVehicleModel(prefill.trim());
       return;
@@ -303,9 +304,8 @@ export function FipeVehicleFields({
       onChangeVehicleModel('');
       return;
     }
-    const brandObj = brands.find((b) => b.codigo === selectedBrandCode);
-    const combined = brandObj
-      ? combineFipeBrandAndModel(brandObj.nome, nextModel)
+    const combined = selectedBrandObj
+      ? combineFipeBrandAndModel(selectedBrandObj.name, nextModel)
       : nextModel;
     onChangeVehicleModel(combined);
   };
@@ -363,7 +363,7 @@ export function FipeVehicleFields({
                 </option>
               ))}
               <option value={CUSTOM_MODEL_OPTION_VALUE}>
-                Outro modelo (digitar)
+                Outro modelo (digitar manualmente)
               </option>
             </select>
           </div>
@@ -437,16 +437,16 @@ export function FipeVehicleFields({
           )}
         </div>
       ) : (
-        <div className="space-y-2.5">
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            {/* FIPE Marca */}
-            <div>
+        <div className="space-y-3">
+          {/* Campo 2 — Marca / Fabricante (sempre antes do Modelo) */}
+          <div className="space-y-1.5">
+            <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:justify-between">
               <label
                 htmlFor={`${idPrefix}-fipe-brand`}
-                className="flex items-center justify-between text-[11px] font-semibold text-zinc-700 mb-1"
+                className="flex items-center gap-1.5 text-[11px] font-semibold text-zinc-700"
               >
                 <span>
-                  Marca (FIPE){' '}
+                  Marca / Fabricante{' '}
                   {required && <span className="text-red-600">*</span>}
                 </span>
                 {isLoadingBrands && (
@@ -455,88 +455,106 @@ export function FipeVehicleFields({
                       className="h-3 w-3 animate-spin"
                       aria-hidden="true"
                     />
-                    <span>Carregando...</span>
+                    <span>Consultando FIPE...</span>
+                  </span>
+                )}
+              </label>
+
+              {brands.length > 8 && (
+                <div className="relative sm:w-44">
+                  <Search
+                    className="pointer-events-none absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-400"
+                    aria-hidden="true"
+                  />
+                  <input
+                    type="search"
+                    value={brandSearch}
+                    onChange={(e) => setBrandSearch(e.target.value)}
+                    placeholder="Filtrar marca..."
+                    aria-label="Filtrar marca do veículo"
+                    className="w-full rounded-md border border-zinc-200 bg-white pl-6 pr-2 py-1 text-[11px] text-zinc-800 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
+                  />
+                </div>
+              )}
+            </div>
+
+            <select
+              id={`${idPrefix}-fipe-brand`}
+              value={selectedBrandCode}
+              onChange={(e) => handleBrandSelectChange(e.target.value)}
+              disabled={isLoadingBrands && brands.length === 0}
+              className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100"
+            >
+              <option value="">
+                {isLoadingBrands
+                  ? 'Carregando marcas...'
+                  : 'Selecione a marca / fabricante...'}
+              </option>
+              {filteredBrands.map((b) => (
+                <option key={b.code} value={b.code}>
+                  {formatFipeBrandLabel(b.name)}
+                </option>
+              ))}
+              <option value={CUSTOM_MODEL_OPTION_VALUE}>
+                Outro modelo (digitar manualmente)
+              </option>
+            </select>
+          </div>
+
+          {/* Campo 3 — Modelo do Veículo (carregado após escolher Marca) */}
+          {!isCustomBrand && (
+            <div>
+              <label
+                htmlFor={`${idPrefix}-fipe-model`}
+                className="flex items-center justify-between text-[11px] font-semibold text-zinc-700 mb-1"
+              >
+                <span>
+                  Modelo do Veículo{' '}
+                  {required && <span className="text-red-600">*</span>}
+                </span>
+                {isLoadingModels && (
+                  <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700">
+                    <Loader2
+                      className="h-3 w-3 animate-spin"
+                      aria-hidden="true"
+                    />
+                    <span>Carregando modelos...</span>
                   </span>
                 )}
               </label>
               <select
-                id={`${idPrefix}-fipe-brand`}
-                value={selectedBrandCode}
-                onChange={(e) => handleBrandSelectChange(e.target.value)}
-                disabled={isLoadingBrands && brands.length === 0}
-                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100"
+                id={`${idPrefix}-fipe-model`}
+                value={selectedModelName}
+                onChange={(e) => handleModelSelectChange(e.target.value)}
+                disabled={!selectedBrandCode || isLoadingModels}
+                className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
               >
                 <option value="">
-                  {isLoadingBrands
-                    ? 'Buscando marcas FIPE...'
-                    : 'Selecione a marca...'}
+                  {!selectedBrandCode
+                    ? 'Escolha a Marca / Fabricante primeiro'
+                    : isLoadingModels
+                    ? 'Buscando modelos...'
+                    : 'Selecione o modelo oficial...'}
                 </option>
-                {brands.map((b) => (
-                  <option key={b.codigo} value={b.codigo}>
-                    {formatFipeBrandLabel(b.nome)}
+                {models.map((m) => (
+                  <option key={`${m.code}-${m.name}`} value={m.name}>
+                    {m.name}
                   </option>
                 ))}
                 <option value={CUSTOM_MODEL_OPTION_VALUE}>
-                  Outro modelo (digitar)
+                  Outro modelo (digitar manualmente)
                 </option>
               </select>
             </div>
+          )}
 
-            {/* FIPE Modelo (or hidden/placeholder when Outro modelo is chosen in Brand) */}
-            {!isCustomBrand && (
-              <div>
-                <label
-                  htmlFor={`${idPrefix}-fipe-model`}
-                  className="flex items-center justify-between text-[11px] font-semibold text-zinc-700 mb-1"
-                >
-                  <span>
-                    Modelo Oficial (FIPE){' '}
-                    {required && <span className="text-red-600">*</span>}
-                  </span>
-                  {isLoadingModels && (
-                    <span className="inline-flex items-center gap-1 text-[10px] font-medium text-emerald-700">
-                      <Loader2
-                        className="h-3 w-3 animate-spin"
-                        aria-hidden="true"
-                      />
-                      <span>Carregando...</span>
-                    </span>
-                  )}
-                </label>
-                <select
-                  id={`${idPrefix}-fipe-model`}
-                  value={selectedModelName}
-                  onChange={(e) => handleModelSelectChange(e.target.value)}
-                  disabled={!selectedBrandCode || isLoadingModels}
-                  className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
-                >
-                  <option value="">
-                    {!selectedBrandCode
-                      ? 'Escolha a marca primeiro'
-                      : isLoadingModels
-                      ? 'Buscando modelos FIPE...'
-                      : 'Selecione o modelo...'}
-                  </option>
-                  {models.map((m) => (
-                    <option key={`${m.codigo}-${m.nome}`} value={m.nome}>
-                      {m.nome}
-                    </option>
-                  ))}
-                  <option value={CUSTOM_MODEL_OPTION_VALUE}>
-                    Outro modelo (digitar)
-                  </option>
-                </select>
-              </div>
-            )}
-          </div>
-
-          {(fipeBrandsError || fipeModelsError) && (
-            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-              {fipeModelsError || fipeBrandsError}
+          {(brandsUsingFallback || modelsUsingFallback) && (
+            <p className="text-[11px] text-zinc-500">
+              Lista local rápida ativa para seleção imediata. Caso não encontre,
+              escolha &ldquo;Outro modelo (digitar manualmente)&rdquo;.
             </p>
           )}
 
-          {/* Fallback manual input when user selects "Outro modelo (digitar)" */}
           {(isCustomBrand || isCustomModel) && (
             <div>
               <label
@@ -564,8 +582,8 @@ export function FipeVehicleFields({
             </div>
           )}
 
+          {/* Campo 4 — Cor do Veículo & Campo 5 — Placa do Veículo */}
           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-            {/* Cor Padronizada */}
             <div>
               <label
                 htmlFor={`${idPrefix}-vehicle-color`}
@@ -589,7 +607,6 @@ export function FipeVehicleFields({
               </select>
             </div>
 
-            {/* Placa do Veículo (ocultada quando Bike) */}
             <div>
               <label
                 htmlFor={`${idPrefix}-vehicle-plate`}

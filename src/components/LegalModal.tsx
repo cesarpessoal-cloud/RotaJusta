@@ -153,9 +153,9 @@ export function LegalModal({
                   utilizada a opção <strong>Pix Direto ao Entregador</strong>,
                   o pagamento é transferido diretamente do solicitante para a
                   Chave Pix do condutor após a aceitação, sem retenção pela
-                  plataforma (com taxa zerada para bicicletas e veículos
-                  elétricos). Cabe às partes conferir o titular, o valor e o
-                  comprovante bancário no ato da operação.
+                  plataforma (com desconto automático de 50% na taxa operacional
+                  para bicicletas e veículos elétricos). Cabe às partes conferir o
+                  titular, o valor e o comprovante bancário no ato da operação.
                 </p>
               </section>
 

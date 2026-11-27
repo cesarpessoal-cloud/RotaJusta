@@ -139,6 +139,29 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [newOfferBanner]);
 
+  const activeSupervisedOrLoggedCourier = useMemo(() => {
+    if (!currentUser) return undefined;
+    if (
+      (currentUser.role === 'entregador' || currentUser.role === 'motorista') &&
+      currentUser.approvalStatus === 'Aprovado'
+    ) {
+      return currentUser;
+    }
+    if (currentUser.role === 'admin' && adminView === 'entregador') {
+      return (
+        approvedCouriers.find((c) => c.id === activeCourierId) ??
+        approvedCouriers[0]
+      );
+    }
+    return undefined;
+  }, [currentUser, adminView, approvedCouriers, activeCourierId]);
+
+  useEffect(() => {
+    if (!activeSupervisedOrLoggedCourier?.isOnline) {
+      setNewOfferBanner(null);
+    }
+  }, [activeSupervisedOrLoggedCourier?.id, activeSupervisedOrLoggedCourier?.isOnline]);
+
   const checkEmptyState = useCallback(async () => {
     if (!isSupabaseConfigured) {
       setDbError(
@@ -282,7 +305,8 @@ export default function App() {
                     freshOrder.type,
                     targetCourier.vehicleType,
                     freshOrder.distanceKm,
-                    targetCourier.bikeMaxRadiusKm
+                    targetCourier.bikeMaxRadiusKm,
+                    freshOrder.requestedVehicle
                   )
                 ) {
                   setNewOfferBanner(freshOrder);
@@ -418,6 +442,15 @@ export default function App() {
                   }
                 : prev
             );
+          }
+
+          if (
+            !nextOnline &&
+            (currentUserRef.current?.id === row.id ||
+              (adminViewRef.current === 'entregador' &&
+                activeCourierIdRef.current === row.id))
+          ) {
+            setNewOfferBanner(null);
           }
         }
       )
@@ -662,8 +695,12 @@ export default function App() {
       return;
     }
 
-    await unlockAudioEngine();
+    if (!nextOnline) {
+      setNewOfferBanner(null);
+    }
+
     if (nextOnline) {
+      await unlockAudioEngine();
       await requestBrowserNotificationPermission();
     }
 
@@ -683,8 +720,8 @@ export default function App() {
       }
       showToast(
         nextOnline
-          ? '🟢 Você está ONLINE! Alertas sonoros de novas ofertas ativados.'
-          : '🔴 Você está OFFLINE. Novas ofertas não tocarão alerta.'
+          ? '🟢 Você está ONLINE! Mural de ofertas liberado e alertas ativados.'
+          : '🔴 Você está OFFLINE. Mural oculto e alertas de novas entregas bloqueados.'
       );
     } catch (err) {
       const msg =
@@ -696,6 +733,12 @@ export default function App() {
   };
 
   const handleTestSoundAlert = async () => {
+    if (!activeSupervisedOrLoggedCourier?.isOnline) {
+      showToast(
+        'Alertas bloqueados enquanto você está OFFLINE. Mude manualmente para ONLINE primeiro.'
+      );
+      return;
+    }
     await unlockAudioEngine();
     await requestBrowserNotificationPermission();
     await playRotaJustaAlert();
@@ -741,6 +784,13 @@ export default function App() {
   };
 
   const handleAcceptOrder = async (orderId: string, courier: Profile) => {
+    if (!courier.isOnline) {
+      showToast(
+        'Você está OFFLINE. Mude manualmente para ONLINE antes de aceitar corridas.'
+      );
+      return;
+    }
+
     const targetOrder =
       waitingOrders.find((o) => o.id === orderId) ||
       orders.find((o) => o.id === orderId);
@@ -751,7 +801,8 @@ export default function App() {
         targetOrder.type,
         courier.vehicleType,
         targetOrder.distanceKm,
-        courier.bikeMaxRadiusKm
+        courier.bikeMaxRadiusKm,
+        targetOrder.requestedVehicle
       )
     ) {
       showToast(
@@ -761,7 +812,11 @@ export default function App() {
     }
 
     const propulsion = courier.propulsion || 'Combustão';
-    const settlement = getCourierSettlementForOrder(targetOrder, propulsion);
+    const settlement = getCourierSettlementForOrder(
+      targetOrder,
+      propulsion,
+      courier.vehicleType
+    );
 
     try {
       const updatedOrder = await acceptDeliveryInSupabase(targetOrder, courier, {
@@ -887,7 +942,7 @@ export default function App() {
 
       if (autoCompleted) {
         const bonusMsg =
-          (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com Bônus EV)' : '';
+          (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com -50% Taxa Bike/EV)' : '';
         showToast(
           `Última parada confirmada! Pedido ${updatedOrder.code} finalizado${bonusMsg} no Supabase.`
         );
@@ -927,7 +982,7 @@ export default function App() {
         prev.map((o) => (o.id === orderId ? updatedOrder : o))
       );
       const bonusMsg =
-        (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com Bônus EV)' : '';
+        (updatedOrder.evBonusApplied ?? 0) > 0 ? ' (com -50% Taxa Bike/EV)' : '';
       showToast(
         `Rota ${updatedOrder.code} finalizada${bonusMsg} no Supabase!`
       );
@@ -1342,7 +1397,7 @@ export default function App() {
           isCourierViewport ? 'max-w-5xl' : 'max-w-[1440px]'
         }`}
       >
-        {newOfferBanner && (
+        {newOfferBanner && activeSupervisedOrLoggedCourier?.isOnline && (
           <div
             role="alert"
             className="rounded-xl border-2 border-emerald-500 bg-emerald-600 px-4 py-3.5 text-white shadow-lg animate-pulse flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
@@ -1363,7 +1418,7 @@ export default function App() {
                     ? ` · ${newOfferBanner.distanceKm} km`
                     : ''}{' '}
                   · {newOfferBanner.pickupNeighborhood} →{' '}
-                  {newOfferBanner.destinationNeighborhood} · Repasse base:{' '}
+                  {newOfferBanner.destinationNeighborhood} · Ganho líquido base:{' '}
                   <strong className="font-mono">
                     {formatBRL(newOfferBanner.basePayout)}
                   </strong>
@@ -1577,8 +1632,8 @@ export default function App() {
             </button>
             <span className="hidden sm:inline text-zinc-400">·</span>
             <span>
-              Taxa fixa transparente · 100% da taxa revertida como bônus para veículos
-              elétricos e bikes
+              Taxa transparente por modal · 50% de desconto na taxa para bicicletas e
+              veículos elétricos
             </span>
           </div>
         </div>

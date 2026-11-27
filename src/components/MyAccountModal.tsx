@@ -34,10 +34,8 @@ import {
   PropulsionType,
   VehicleType,
 } from '../types';
-import {
-  formatPlateInput,
-  isValidBrazilianPlate,
-} from '../utils/courierIdentity';
+import { isValidBrazilianPlate } from '../utils/courierIdentity';
+import { getFipeGroupForVehicleType } from '../utils/fipeApi';
 import { formatCpfOrCnpj } from '../utils/documentValidation';
 import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
 import { compressImageToJpeg } from '../utils/imageCompression';
@@ -52,6 +50,7 @@ import {
   VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
 import { CourierAvatar } from './CourierAvatar';
+import { FipeVehicleFields } from './FipeVehicleFields';
 
 interface MyAccountModalProps {
   currentUser: Profile;
@@ -272,7 +271,12 @@ export function MyAccountModal({
   };
 
   const handleVehicleCategoryChange = (nextVehicle: VehicleType) => {
+    const prevGroup = getFipeGroupForVehicleType(vehicleTypeInput);
+    const nextGroup = getFipeGroupForVehicleType(nextVehicle);
     setVehicleTypeInput(nextVehicle);
+    if (prevGroup !== nextGroup) {
+      setVehicleModelInput('');
+    }
     const allowed = getPropulsionOptionsForVehicle(nextVehicle);
     if (!allowed.includes(propulsionInput)) {
       setPropulsionInput(allowed[0]);
@@ -289,7 +293,7 @@ export function MyAccountModal({
     if (!vehicleModelInput.trim() || !vehicleColorInput.trim()) {
       setVehicleMsg({
         type: 'err',
-        text: 'Informe o modelo e a cor do veículo (ex.: Honda CG 160 / Preta).',
+        text: 'Selecione a marca, o modelo e a cor do veículo para identificação segura.',
       });
       return;
     }
@@ -916,69 +920,17 @@ export function MyAccountModal({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                <div>
-                  <label
-                    htmlFor="acc-vehicle-model"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Modelo do Veículo
-                  </label>
-                  <input
-                    id="acc-vehicle-model"
-                    type="text"
-                    value={vehicleModelInput}
-                    onChange={(e) => setVehicleModelInput(e.target.value)}
-                    placeholder="Ex: Honda CG 160"
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="acc-vehicle-color"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Cor do Veículo
-                  </label>
-                  <input
-                    id="acc-vehicle-color"
-                    type="text"
-                    value={vehicleColorInput}
-                    onChange={(e) => setVehicleColorInput(e.target.value)}
-                    placeholder="Ex: Preta"
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 focus:border-emerald-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="acc-vehicle-plate"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Placa{' '}
-                    {vehicleTypeInput === 'Bike' && (
-                      <span className="font-normal text-zinc-400">
-                        (opcional)
-                      </span>
-                    )}
-                  </label>
-                  <input
-                    id="acc-vehicle-plate"
-                    type="text"
-                    maxLength={8}
-                    disabled={vehicleTypeInput === 'Bike'}
-                    value={plateInput}
-                    onChange={(e) =>
-                      setPlateInput(formatPlateInput(e.target.value))
-                    }
-                    placeholder={
-                      vehicleTypeInput === 'Bike' ? 'Bicicleta' : 'ABC1D23'
-                    }
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-zinc-900 focus:border-emerald-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-zinc-100"
-                  />
-                </div>
-              </div>
+              <FipeVehicleFields
+                key={currentUser.id}
+                idPrefix="acc"
+                vehicleType={vehicleTypeInput}
+                vehicleModel={vehicleModelInput}
+                vehicleColor={vehicleColorInput}
+                plate={plateInput}
+                onChangeVehicleModel={setVehicleModelInput}
+                onChangeVehicleColor={setVehicleColorInput}
+                onChangePlate={setPlateInput}
+              />
 
               {vehicleMsg && (
                 <p

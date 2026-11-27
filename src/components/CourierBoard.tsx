@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  BellOff,
   BellRing,
   Bike,
   CalendarClock,
@@ -40,10 +41,10 @@ import {
 } from '../types';
 import { updateCourierIdentityInSupabase } from '../lib/supabaseService';
 import {
-  formatPlateInput,
   formatVehicleModelAndColor,
   isValidBrazilianPlate,
 } from '../utils/courierIdentity';
+import { getFipeGroupForVehicleType } from '../utils/fipeApi';
 import { formatCpfOrCnpj } from '../utils/documentValidation';
 import { compressImageToJpeg } from '../utils/imageCompression';
 import {
@@ -55,8 +56,10 @@ import {
 import {
   formatBRL,
   formatDateTimeBR,
+  formatVehicleModalDisplayName,
   getCourierSettlementForOrder,
-  isZeroFeePropulsion,
+  hasCleanMobilityDiscount,
+  PROGRESSIVE_PLATFORM_FEE_NOTE,
 } from '../utils/pricing';
 import { formatPickupCode } from '../utils/pickupCode';
 import {
@@ -75,13 +78,16 @@ import {
   VEHICLE_CATEGORIES,
 } from '../utils/vehicleCompatibility';
 import { CourierAvatar, VehiclePlateBadge } from './CourierAvatar';
+import { FipeVehicleFields } from './FipeVehicleFields';
 import {
   ApprovalStatusBadge,
   EvBadge,
   FreightBadge,
   OrderStatusBadge,
+  PaymentStatusBadge,
   PropulsionTag,
 } from './EvBadge';
+import { PixQrCodeSettlement } from './PixQrCodeSettlement';
 import { PortoAlegreMap } from './PortoAlegreMap';
 import { OrderRatingBox, RatingBadge } from './RatingWidgets';
 
@@ -184,6 +190,9 @@ export function CourierBoard({
   const [confirmingReceiptOrderId, setConfirmingReceiptOrderId] = useState<
     string | null
   >(null);
+  const [openPixQrOrderIds, setOpenPixQrOrderIds] = useState<
+    Record<string, boolean>
+  >({});
 
   // Identidade Visual & Veículo (Tab 3)
   const [avatarDraft, setAvatarDraft] = useState<string>(
@@ -249,7 +258,7 @@ export function CourierBoard({
   );
 
   const compatibleAvailableOrders = useMemo(() => {
-    if (!activeCourier) return [];
+    if (!activeCourier || !activeCourier.isOnline) return [];
     return sortCompatibleOrdersForVehicle(
       allWaitingOrders,
       activeCourier.vehicleType,
@@ -258,11 +267,16 @@ export function CourierBoard({
   }, [allWaitingOrders, activeCourier]);
 
   const exceededBikeRadiusCount = useMemo(() => {
-    if (!isBike || effectiveBikeRadius === null) return 0;
+    if (!activeCourier?.isOnline || !isBike || effectiveBikeRadius === null) {
+      return 0;
+    }
     return allWaitingOrders.filter(
-      (o) => o.type === 'rapida' && (o.distanceKm ?? 1) > effectiveBikeRadius
+      (o) =>
+        o.type === 'rapida' &&
+        (!o.requestedVehicle || o.requestedVehicle === 'Bike') &&
+        (o.distanceKm ?? 1) > effectiveBikeRadius
     ).length;
-  }, [isBike, effectiveBikeRadius, allWaitingOrders]);
+  }, [activeCourier?.isOnline, isBike, effectiveBikeRadius, allWaitingOrders]);
 
   const hiddenIncompatibleCount =
     allWaitingOrders.length - compatibleAvailableOrders.length;
@@ -475,7 +489,7 @@ export function CourierBoard({
   };
 
   const handleAcceptClick = async (orderId: string) => {
-    if (!activeCourier) return;
+    if (!activeCourier || !activeCourier.isOnline) return;
     setAcceptingOrderId(orderId);
     try {
       await onAcceptOrder(orderId, activeCourier);
@@ -498,8 +512,13 @@ export function CourierBoard({
     );
   }
 
-  const isZeroFee = isZeroFeePropulsion(activeCourier.propulsion);
-  const offersBadgeCount = myActiveOrders.length + compatibleAvailableOrders.length;
+  const hasFeeDiscount = hasCleanMobilityDiscount(
+    activeCourier.propulsion,
+    activeCourier.vehicleType
+  );
+  const offersBadgeCount =
+    myActiveOrders.length +
+    (activeCourier.isOnline ? compatibleAvailableOrders.length : 0);
 
   return (
     <div className="mx-auto max-w-5xl space-y-5 pb-24 md:pb-6">
@@ -624,24 +643,31 @@ export function CourierBoard({
               </span>
             </button>
 
-            <button
-              type="button"
-              disabled={isTestingSound}
-              onClick={async () => {
-                setIsTestingSound(true);
-                try {
-                  await onTestSoundAlert();
-                } finally {
-                  setIsTestingSound(false);
-                }
-              }}
-              className="min-h-[44px] w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-zinc-50 px-4 py-2.5 text-xs sm:text-sm font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 disabled:opacity-60 whitespace-nowrap shrink-0"
-            >
-              <Volume2 className="h-4 w-4 text-emerald-700" aria-hidden="true" />
-              <span>
-                {isTestingSound ? 'Tocando alerta...' : 'Testar Som de Alerta'}
-              </span>
-            </button>
+            {activeCourier.isOnline ? (
+              <button
+                type="button"
+                disabled={isTestingSound}
+                onClick={async () => {
+                  setIsTestingSound(true);
+                  try {
+                    await onTestSoundAlert();
+                  } finally {
+                    setIsTestingSound(false);
+                  }
+                }}
+                className="min-h-[44px] w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-300 bg-zinc-50 px-4 py-2.5 text-xs sm:text-sm font-semibold text-zinc-800 transition-colors hover:bg-zinc-100 disabled:opacity-60 whitespace-nowrap shrink-0"
+              >
+                <Volume2 className="h-4 w-4 text-emerald-700" aria-hidden="true" />
+                <span>
+                  {isTestingSound ? 'Tocando alerta...' : 'Testar Som de Alerta'}
+                </span>
+              </button>
+            ) : (
+              <div className="inline-flex items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-zinc-100 px-4 py-2.5 text-xs font-semibold text-zinc-600 whitespace-nowrap shrink-0">
+                <BellOff className="h-4 w-4 text-zinc-500" aria-hidden="true" />
+                <span>Alertas e notificações bloqueados (OFFLINE)</span>
+              </div>
+            )}
           </section>
 
           {/* Featured Card: Entrega / Frete em Andamento */}
@@ -672,7 +698,8 @@ export function CourierBoard({
                     deliveredCount === order.stops.length;
                   const settlement = getCourierSettlementForOrder(
                     order,
-                    activeCourier.propulsion || 'Combustão'
+                    activeCourier.propulsion || 'Combustão',
+                    activeCourier.vehicleType
                   );
                   const scheduleLabel = formatPickupScheduleLabel(
                     order.pickupSchedule
@@ -817,14 +844,15 @@ export function CourierBoard({
                         </div>
 
                         <div className="flex flex-wrap items-center gap-3">
-                          <div className="text-left sm:text-right">
+                          <div className="text-left sm:text-right space-y-0.5">
                             <p className="font-mono text-lg font-bold text-emerald-700 tabular-nums">
-                              {formatBRL(settlement.netPayout)}
+                              Ganho líquido: {formatBRL(settlement.netPayout)}
                             </p>
-                            <p className="text-xs text-zinc-500 font-mono tabular-nums">
+                            <p className="text-[11px] text-zinc-600 font-mono tabular-nums">
+                              Total: {formatBRL(order.grossTotal)} ·{' '}
                               {settlement.evBonus > 0
-                                ? `Taxa Zero (+${formatBRL(settlement.evBonus)} EV)`
-                                : `Taxa ${formatBRL(settlement.platformFee)}`}
+                                ? `Taxa op.: ${formatBRL(order.standardPlatformFee)} → ${formatBRL(settlement.platformFee)} (-50% Bike/EV)`
+                                : `Taxa op. inicial: ${formatBRL(settlement.platformFee)}`}
                             </p>
                           </div>
                           <OrderStatusBadge status={order.status} />
@@ -1459,6 +1487,73 @@ export function CourierBoard({
                         </div>
                       </div>
 
+                      {/* Pagamento / Acerto via QR Code Pix vinculado ao código #RS-XXXX */}
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-3.5 space-y-3">
+                        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <QrCode
+                              className="h-4 w-4 text-emerald-700 shrink-0"
+                              aria-hidden="true"
+                            />
+                            <span className="text-xs font-bold text-zinc-900">
+                              Acerto via QR Code Pix ({order.code}) ·{' '}
+                              {formatBRL(settlement.netPayout)}
+                            </span>
+                            <PaymentStatusBadge status={order.paymentStatus} compact />
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenPixQrOrderIds((prev) => ({
+                                  ...prev,
+                                  [order.id]: !prev[order.id],
+                                }))
+                              }
+                              className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap"
+                            >
+                              <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>
+                                {openPixQrOrderIds[order.id]
+                                  ? 'Ocultar QR Code Pix'
+                                  : 'Gerar QR Code Pix'}
+                              </span>
+                            </button>
+
+                            {order.paymentStatus !== 'repassado' && (
+                              <button
+                                type="button"
+                                disabled={confirmingReceiptOrderId === order.id}
+                                onClick={() => void handleConfirmReceiptClick(order.id)}
+                                className="min-h-[38px] inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap"
+                              >
+                                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                                <span>
+                                  {confirmingReceiptOrderId === order.id
+                                    ? 'Confirmando...'
+                                    : 'Confirmar Pagamento Recebido'}
+                                </span>
+                              </button>
+                            )}
+                          </div>
+                        </div>
+
+                        {openPixQrOrderIds[order.id] && (
+                          <PixQrCodeSettlement
+                            orderCode={order.code}
+                            amount={settlement.netPayout}
+                            recipientName={activeCourier.name}
+                            pixKey={activeCourier.pixKey}
+                            paymentStatus={order.paymentStatus}
+                            viewerRole="courier"
+                            isConfirming={confirmingReceiptOrderId === order.id}
+                            onConfirmAction={() => handleConfirmReceiptClick(order.id)}
+                            confirmButtonLabel="Confirmar Pagamento Recebido"
+                          />
+                        )}
+                      </div>
+
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-t border-zinc-100 pt-4">
                         <p className="text-xs text-zinc-600">
                           {allStopsDelivered ? (
@@ -1495,252 +1590,336 @@ export function CourierBoard({
             </section>
           )}
 
-          {/* Available Compatible Offers List */}
-          <section className="space-y-4">
-            <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
-              <div>
+          {/* Available Compatible Offers List (STRICTLY HIDDEN WHEN OFFLINE) */}
+          {!activeCourier.isOnline ? (
+            <section className="rounded-2xl border-2 border-dashed border-zinc-300 bg-white p-8 sm:p-10 text-center space-y-4">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-red-50 text-red-600">
+                <BellOff className="h-6 w-6" aria-hidden="true" />
+              </div>
+              <div className="space-y-1.5 max-w-lg mx-auto">
                 <h2 className="font-display text-lg sm:text-xl font-bold text-zinc-900">
-                  Ofertas Disponíveis em Porto Alegre
+                  Você está OFFLINE — Mural de ofertas oculto
                 </h2>
+                <p className="text-xs sm:text-sm text-zinc-600 leading-relaxed">
+                  Enquanto seu status estiver como <strong>OFFLINE</strong>, o mural de ofertas disponíveis fica totalmente oculto e todos os alertas e notificações de novas entregas permanecem bloqueados.
+                </p>
                 <p className="text-xs text-zinc-500">
-                  Filtradas para {activeCourier.vehicleType || 'seu veículo'}
-                  {isBike
-                    ? ` · Raio ${
-                        effectiveBikeRadius === null
-                          ? 'Sem limite'
-                          : `até ${effectiveBikeRadius} km`
-                      }`
-                    : ''}
-                  {hiddenIncompatibleCount > 0
-                    ? ` · ${hiddenIncompatibleCount} incompatível(is) oculta(s)`
-                    : ''}
+                  Mude manualmente para <strong>ONLINE</strong> para visualizar corridas compatíveis com{' '}
+                  <strong className="text-zinc-800">
+                    {formatVehicleModalDisplayName(activeCourier.vehicleType)}
+                  </strong>
+                  .
                 </p>
               </div>
-              <span className="font-mono text-xs font-semibold text-zinc-600 tabular-nums">
-                {compatibleAvailableOrders.length} oferta(s)
-              </span>
-            </div>
-
-            {compatibleAvailableOrders.length === 0 ? (
-              <div className="rounded-2xl border border-zinc-200 bg-white p-8 sm:p-10 text-center space-y-2">
-                <p className="text-sm font-semibold text-zinc-900">
-                  Nenhuma oferta disponível para {activeCourier.vehicleType} no
-                  momento.
-                </p>
-                <p className="text-xs text-zinc-600 max-w-md mx-auto leading-relaxed">
-                  {activeCourier.isOnline
-                    ? 'Você está ONLINE: assim que um lojista ou cliente publicar uma entrega compatível em Porto Alegre, você ouvirá o alerta "RotaJusta!".'
-                    : 'Fique ONLINE no botão acima para receber alertas sonoros assim que surgir uma nova oferta.'}
-                </p>
-                {isBike &&
-                  effectiveBikeRadius !== null &&
-                  exceededBikeRadiusCount > 0 && (
-                    <p className="text-xs text-emerald-700 font-medium pt-1">
-                      Há {exceededBikeRadiusCount} entrega(s) acima de{' '}
-                      {effectiveBikeRadius} km. Ajuste seu raio na aba Meu Perfil.
-                    </p>
-                  )}
+              <button
+                type="button"
+                disabled={isTogglingOnline}
+                onClick={async () => {
+                  setIsTogglingOnline(true);
+                  try {
+                    await onToggleOnlineStatus(activeCourier.id, true);
+                  } finally {
+                    setIsTogglingOnline(false);
+                  }
+                }}
+                className="min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:opacity-60"
+              >
+                <span>
+                  {isTogglingOnline ? 'Conectando...' : '🟢 Ficar ONLINE agora'}
+                </span>
+              </button>
+            </section>
+          ) : (
+            <section className="space-y-4">
+              <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+                <div>
+                  <h2 className="font-display text-lg sm:text-xl font-bold text-zinc-900">
+                    Ofertas Disponíveis em Porto Alegre
+                  </h2>
+                  <p className="text-xs text-zinc-500">
+                    Filtradas exclusivamente para{' '}
+                    {formatVehicleModalDisplayName(activeCourier.vehicleType)}
+                    {isBike
+                      ? ` · Raio ${
+                          effectiveBikeRadius === null
+                            ? 'Sem limite'
+                            : `até ${effectiveBikeRadius} km`
+                        }`
+                      : ''}
+                    {hiddenIncompatibleCount > 0
+                      ? ` · ${hiddenIncompatibleCount} incompatível(is) oculta(s)`
+                      : ''}
+                  </p>
+                </div>
+                <span className="font-mono text-xs font-semibold text-zinc-600 tabular-nums">
+                  {compatibleAvailableOrders.length} oferta(s)
+                </span>
               </div>
-            ) : (
-              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-                {compatibleAvailableOrders.map((order) => {
-                  const settlement = getCourierSettlementForOrder(
-                    order,
-                    activeCourier.propulsion || 'Combustão'
-                  );
-                  const isMapOpen = previewMapOrderId === order.id;
-                  const isHighlightedUtilityFreight =
-                    activeCourier.vehicleType === 'Utilitário / Picape / Van' &&
-                    order.type === 'frete';
-                  const scheduleLabel = formatPickupScheduleLabel(
-                    order.pickupSchedule
-                  );
 
-                  return (
-                    <article
-                      key={order.id}
-                      className={`flex flex-col justify-between rounded-2xl border p-4 sm:p-5 space-y-4 ${
-                        isHighlightedUtilityFreight
-                          ? 'border-amber-300 bg-amber-50/15'
-                          : 'border-zinc-200 bg-white'
-                      }`}
-                    >
-                      <div className="space-y-3">
-                        {/* Top row: Code + Type/Distance + Net Payout */}
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="space-y-1">
-                            <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-                              <span className="font-mono font-bold text-zinc-900">
-                                {order.code}
-                              </span>
-                              <span aria-hidden="true">·</span>
-                              {order.type === 'frete' ? (
-                                <FreightBadge compact />
-                              ) : (
-                                <span className="inline-flex items-center gap-1 font-medium text-zinc-700">
-                                  {order.type === 'rapida' ? (
-                                    <MapPin
-                                      className="h-3.5 w-3.5 text-emerald-600"
-                                      aria-hidden="true"
-                                    />
-                                  ) : (
-                                    <Package
-                                      className="h-3.5 w-3.5 text-emerald-600"
-                                      aria-hidden="true"
-                                    />
-                                  )}
-                                  {order.type === 'rapida'
-                                    ? `Entrega Rápida${
-                                        order.distanceKm !== undefined
-                                          ? ` · ${order.distanceKm.toLocaleString('pt-BR')} km`
-                                          : ''
-                                      }`
-                                    : `Rota (${order.packageCount} pacotes)`}
+              {compatibleAvailableOrders.length === 0 ? (
+                <div className="rounded-2xl border border-zinc-200 bg-white p-8 sm:p-10 text-center space-y-2">
+                  <p className="text-sm font-semibold text-zinc-900">
+                    Nenhuma oferta disponível para{' '}
+                    {formatVehicleModalDisplayName(activeCourier.vehicleType)} no
+                    momento.
+                  </p>
+                  <p className="text-xs text-zinc-600 max-w-md mx-auto leading-relaxed">
+                    Você está ONLINE: assim que um lojista ou cliente publicar uma entrega compatível com seu veículo em Porto Alegre, você receberá o alerta &ldquo;RotaJusta!&rdquo;.
+                  </p>
+                  {isBike &&
+                    effectiveBikeRadius !== null &&
+                    exceededBikeRadiusCount > 0 && (
+                      <p className="text-xs text-emerald-700 font-medium pt-1">
+                        Há {exceededBikeRadiusCount} entrega(s) acima de{' '}
+                        {effectiveBikeRadius} km. Ajuste seu raio na aba Meu Perfil.
+                      </p>
+                    )}
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                  {compatibleAvailableOrders.map((order) => {
+                    const settlement = getCourierSettlementForOrder(
+                      order,
+                      activeCourier.propulsion || 'Combustão',
+                      activeCourier.vehicleType
+                    );
+                    const isMapOpen = previewMapOrderId === order.id;
+                    const isHighlightedUtilityFreight =
+                      activeCourier.vehicleType === 'Utilitário / Picape / Van' &&
+                      order.type === 'frete';
+                    const scheduleLabel = formatPickupScheduleLabel(
+                      order.pickupSchedule
+                    );
+
+                    return (
+                      <article
+                        key={order.id}
+                        className={`flex flex-col justify-between rounded-2xl border p-4 sm:p-5 space-y-4 ${
+                          isHighlightedUtilityFreight
+                            ? 'border-amber-300 bg-amber-50/15'
+                            : 'border-zinc-200 bg-white'
+                        }`}
+                      >
+                        <div className="space-y-3">
+                          {/* Top row: Code + Type/Distance + Net Payout */}
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+                                <span className="font-mono font-bold text-zinc-900">
+                                  {order.code}
                                 </span>
-                              )}
+                                <span aria-hidden="true">·</span>
+                                {order.type === 'frete' ? (
+                                  <FreightBadge compact />
+                                ) : (
+                                  <span className="inline-flex items-center gap-1 font-medium text-zinc-700">
+                                    {order.type === 'rapida' ? (
+                                      <MapPin
+                                        className="h-3.5 w-3.5 text-emerald-600"
+                                        aria-hidden="true"
+                                      />
+                                    ) : (
+                                      <Package
+                                        className="h-3.5 w-3.5 text-emerald-600"
+                                        aria-hidden="true"
+                                      />
+                                    )}
+                                    {order.type === 'rapida'
+                                      ? `Entrega Rápida${
+                                          order.distanceKm !== undefined
+                                            ? ` · ${order.distanceKm.toLocaleString('pt-BR')} km`
+                                            : ''
+                                        }`
+                                      : `Rota (${order.packageCount} pacotes)`}
+                                  </span>
+                                )}
+                                {order.requestedVehicle && (
+                                  <span className="rounded bg-zinc-100 border border-zinc-200 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-700">
+                                    {formatVehicleModalDisplayName(order.requestedVehicle)}
+                                  </span>
+                                )}
+                              </div>
+
+                              <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
+                                <span>{order.merchantName}</span>
+                                <RatingBadge
+                                  avg={order.merchantRatingAvg}
+                                  count={order.merchantRatingCount}
+                                  compact
+                                />
+                              </div>
                             </div>
 
-                            <div className="flex flex-wrap items-center gap-1.5 text-xs text-zinc-500">
-                              <span>{order.merchantName}</span>
-                              <RatingBadge
-                                avg={order.merchantRatingAvg}
-                                count={order.merchantRatingCount}
-                                compact
+                            <div className="text-right shrink-0">
+                              <p className="text-[11px] font-medium text-zinc-500">
+                                Ganho líquido
+                              </p>
+                              <p className="font-mono text-xl font-bold text-emerald-700 tabular-nums">
+                                {formatBRL(settlement.netPayout)}
+                              </p>
+                            </div>
+                          </div>
+
+                          {scheduleLabel && (
+                            <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs font-semibold text-amber-950">
+                              <CalendarClock
+                                className="h-4 w-4 text-amber-700 shrink-0"
+                                aria-hidden="true"
                               />
+                              <span>{scheduleLabel}</span>
                             </div>
+                          )}
+
+                          {/* Pickup & Destination */}
+                          <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1.5">
+                            <h3 className="font-display text-base font-bold text-zinc-900">
+                              {order.pickupNeighborhood} →{' '}
+                              {order.destinationNeighborhood}
+                            </h3>
+                            <p className="text-xs text-zinc-600">
+                              Coleta: {order.pickupAddress} (
+                              {order.pickupNeighborhood})
+                            </p>
+                            <p className="text-xs text-zinc-500">
+                              {order.stops.length} parada(s) ·{' '}
+                              {order.distanceKm !== undefined
+                                ? `${order.distanceKm.toLocaleString('pt-BR')} km estimados`
+                                : `${order.packageCount} pacote(s)`}{' '}
+                              · {formatPaymentMethodLabel(order.paymentMethod)}
+                            </p>
+                            {order.flowDirection === 'receber' && (
+                              <p className="text-[11px] font-medium text-sky-800">
+                                Retirada em terceiros · Entrega ao solicitante
+                              </p>
+                            )}
                           </div>
 
-                          <div className="text-right shrink-0">
-                            <p className="text-[11px] font-medium text-zinc-500">
-                              Valor líquido
-                            </p>
-                            <p className="font-mono text-xl font-bold text-emerald-700 tabular-nums">
-                              {formatBRL(settlement.netPayout)}
+                          {/* Transparent Ride Financial Breakdown */}
+                          <div className="rounded-xl border border-zinc-200 bg-white p-3 space-y-1.5 text-xs">
+                            <div className="flex items-center justify-between text-zinc-600">
+                              <span>Valor total da corrida</span>
+                              <span className="font-mono font-semibold text-zinc-900 tabular-nums">
+                                {formatBRL(order.grossTotal)}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between text-zinc-600">
+                              <span>
+                                {settlement.hasDiscount
+                                  ? 'Taxa operacional (-50% Bike/EV)'
+                                  : 'Taxa operacional inicial da plataforma'}
+                              </span>
+                              <span className="font-mono font-semibold text-zinc-900 tabular-nums">
+                                {settlement.hasDiscount ? (
+                                  <span className="text-emerald-700">
+                                    <span className="line-through text-zinc-400 mr-1.5">
+                                      {formatBRL(order.standardPlatformFee)}
+                                    </span>
+                                    -{formatBRL(settlement.platformFee)} (-50%)
+                                  </span>
+                                ) : (
+                                  `-${formatBRL(settlement.platformFee)}`
+                                )}
+                              </span>
+                            </div>
+                            <div className="flex items-center justify-between border-t border-zinc-100 pt-1.5 font-bold text-emerald-800">
+                              <span>Seu ganho líquido</span>
+                              <span className="font-mono tabular-nums">
+                                {formatBRL(settlement.netPayout)}
+                              </span>
+                            </div>
+                            <p className="text-[10px] leading-snug text-zinc-500">
+                              {PROGRESSIVE_PLATFORM_FEE_NOTE}
                             </p>
                           </div>
-                        </div>
 
-                        {scheduleLabel && (
-                          <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-xs font-semibold text-amber-950">
-                            <CalendarClock
-                              className="h-4 w-4 text-amber-700 shrink-0"
-                              aria-hidden="true"
+                          {order.type === 'frete' && order.freightDetails && (
+                            <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 space-y-1 text-xs">
+                              <p className="font-semibold text-zinc-900">
+                                Carga: {order.freightDetails.cargoDescription}
+                              </p>
+                              <p className="text-zinc-700">
+                                Porte:{' '}
+                                <strong>
+                                  {order.freightDetails.cargoSize === 'grande'
+                                    ? 'Grande/Volumoso'
+                                    : 'Médio'}
+                                </strong>{' '}
+                                ·{' '}
+                                {order.freightDetails.includeHelper
+                                  ? 'Com ajudante (+R$ 40,00)'
+                                  : 'Sem ajudante'}{' '}
+                                · Acesso: {order.freightDetails.accessNote}
+                              </p>
+                            </div>
+                          )}
+
+                          {isMapOpen && (
+                            <PortoAlegreMap
+                              pickup={{
+                                label: order.merchantName,
+                                address: order.pickupAddress,
+                                neighborhood: order.pickupNeighborhood,
+                                lat: order.pickupLat,
+                                lng: order.pickupLng,
+                              }}
+                              stops={order.stops}
+                              orderCode={order.code}
+                              heightClass="h-[230px]"
+                              title={`Prévia ${order.code}`}
                             />
-                            <span>{scheduleLabel}</span>
-                          </div>
-                        )}
-
-                        {/* Pickup & Destination */}
-                        <div className="rounded-xl border border-zinc-200 bg-zinc-50/70 p-3.5 space-y-1.5">
-                          <h3 className="font-display text-base font-bold text-zinc-900">
-                            {order.pickupNeighborhood} →{' '}
-                            {order.destinationNeighborhood}
-                          </h3>
-                          <p className="text-xs text-zinc-600">
-                            Coleta: {order.pickupAddress} (
-                            {order.pickupNeighborhood})
-                          </p>
-                          <p className="text-xs text-zinc-500">
-                            {order.stops.length} parada(s) ·{' '}
-                            {order.distanceKm !== undefined
-                              ? `${order.distanceKm.toLocaleString('pt-BR')} km estimados`
-                              : `${order.packageCount} pacote(s)`}{' '}
-                            · {formatPaymentMethodLabel(order.paymentMethod)}
-                          </p>
-                          {order.flowDirection === 'receber' && (
-                            <p className="text-[11px] font-medium text-sky-800">
-                              Retirada em terceiros · Entrega ao solicitante
-                            </p>
                           )}
                         </div>
 
-                        {order.type === 'frete' && order.freightDetails && (
-                          <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 space-y-1 text-xs">
-                            <p className="font-semibold text-zinc-900">
-                              Carga: {order.freightDetails.cargoDescription}
-                            </p>
-                            <p className="text-zinc-700">
-                              Porte:{' '}
-                              <strong>
-                                {order.freightDetails.cargoSize === 'grande'
-                                  ? 'Grande/Volumoso'
-                                  : 'Médio'}
-                              </strong>{' '}
-                              ·{' '}
-                              {order.freightDetails.includeHelper
-                                ? 'Com ajudante (+R$ 40,00)'
-                                : 'Sem ajudante'}{' '}
-                              · Acesso: {order.freightDetails.accessNote}
-                            </p>
+                        <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between pt-1">
+                          <div className="flex items-center justify-between sm:justify-start gap-2">
+                            {hasFeeDiscount ? (
+                              <EvBadge
+                                compact
+                                propulsion={activeCourier.propulsion}
+                              />
+                            ) : (
+                              <span className="text-xs text-zinc-500 font-mono tabular-nums">
+                                Taxa inicial: {formatBRL(settlement.platformFee)}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setPreviewMapOrderId(isMapOpen ? null : order.id)
+                              }
+                              className="min-h-[40px] inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                            >
+                              <MapIcon
+                                className="h-3.5 w-3.5 text-emerald-600"
+                                aria-hidden="true"
+                              />
+                              <span>
+                                {isMapOpen ? 'Ocultar Mapa' : 'Ver no Mapa'}
+                              </span>
+                            </button>
                           </div>
-                        )}
 
-                        {isMapOpen && (
-                          <PortoAlegreMap
-                            pickup={{
-                              label: order.merchantName,
-                              address: order.pickupAddress,
-                              neighborhood: order.pickupNeighborhood,
-                              lat: order.pickupLat,
-                              lng: order.pickupLng,
-                            }}
-                            stops={order.stops}
-                            orderCode={order.code}
-                            heightClass="h-[230px]"
-                            title={`Prévia ${order.code}`}
-                          />
-                        )}
-                      </div>
-
-                      <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center sm:justify-between pt-1">
-                        <div className="flex items-center justify-between sm:justify-start gap-2">
-                          {isZeroFee ? (
-                            <EvBadge
-                              compact
-                              propulsion={activeCourier.propulsion}
-                            />
-                          ) : (
-                            <span className="text-xs text-zinc-500 font-mono tabular-nums">
-                              Taxa app: {formatBRL(settlement.platformFee)}
-                            </span>
-                          )}
                           <button
                             type="button"
-                            onClick={() =>
-                              setPreviewMapOrderId(isMapOpen ? null : order.id)
-                            }
-                            className="min-h-[40px] inline-flex items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-50"
+                            disabled={acceptingOrderId === order.id}
+                            onClick={() => void handleAcceptClick(order.id)}
+                            className="min-h-[48px] w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap shrink-0"
                           >
-                            <MapIcon
-                              className="h-3.5 w-3.5 text-emerald-600"
-                              aria-hidden="true"
-                            />
+                            <Truck className="h-4 w-4" aria-hidden="true" />
                             <span>
-                              {isMapOpen ? 'Ocultar Mapa' : 'Ver no Mapa'}
+                              {acceptingOrderId === order.id
+                                ? 'Aceitando...'
+                                : 'Aceitar Corrida'}
                             </span>
                           </button>
                         </div>
-
-                        <button
-                          type="button"
-                          disabled={acceptingOrderId === order.id}
-                          onClick={() => void handleAcceptClick(order.id)}
-                          className="min-h-[48px] w-full sm:w-auto inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-bold text-white transition-colors hover:bg-emerald-700 disabled:opacity-60 whitespace-nowrap shrink-0"
-                        >
-                          <Truck className="h-4 w-4" aria-hidden="true" />
-                          <span>
-                            {acceptingOrderId === order.id
-                              ? 'Aceitando...'
-                              : 'Aceitar Corrida'}
-                          </span>
-                        </button>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
         </div>
       )}
 
@@ -2007,10 +2186,14 @@ export function CourierBoard({
                   );
                   const netValue = order.netCourierPayout ?? order.basePayout;
                   const evBonus = order.evBonusApplied ?? 0;
+                  const appliedFee =
+                    order.appliedPlatformFee ??
+                    Math.max(0, Number((order.standardPlatformFee - evBonus).toFixed(2)));
                   const isConfirmedByCourier =
                     order.paymentStatus === 'repassado';
                   const isPaidByMerchant =
                     order.paymentStatus === 'pago_lojista';
+                  const isQrOpen = Boolean(openPixQrOrderIds[order.id]);
 
                   return (
                     <div key={order.id} className="p-4 sm:p-5 space-y-3 text-sm">
@@ -2044,6 +2227,14 @@ export function CourierBoard({
                             )}{' '}
                             · {order.stops.length} parada(s) ·{' '}
                             {formatPaymentMethodLabel(order.paymentMethod)}
+                          </p>
+                          <p className="text-[11px] font-mono text-zinc-600 tabular-nums">
+                            Total: {formatBRL(order.grossTotal)} · Taxa:{' '}
+                            {formatBRL(appliedFee)}
+                            {evBonus > 0
+                              ? ` (-50% Bike/EV · economia ${formatBRL(evBonus)})`
+                              : ''}{' '}
+                            · Líquido: {formatBRL(netValue)}
                           </p>
                         </div>
 
@@ -2083,9 +2274,25 @@ export function CourierBoard({
                                   className="h-3.5 w-3.5 text-amber-600"
                                   aria-hidden="true"
                                 />
-                                <span>Aguardando Confirmação do Lojista</span>
+                                <span>Aguardando Pagamento</span>
                               </span>
                             )}
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setOpenPixQrOrderIds((prev) => ({
+                                  ...prev,
+                                  [order.id]: !isQrOpen,
+                                }))
+                              }
+                              className="min-h-[36px] inline-flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-50 whitespace-nowrap"
+                            >
+                              <QrCode className="h-3.5 w-3.5" aria-hidden="true" />
+                              <span>
+                                {isQrOpen ? 'Ocultar QR Code' : 'QR Code Pix'}
+                              </span>
+                            </button>
 
                             {!isConfirmedByCourier && (
                               <button
@@ -2102,13 +2309,29 @@ export function CourierBoard({
                                 <span>
                                   {confirmingReceiptOrderId === order.id
                                     ? 'Confirmando...'
-                                    : 'Confirmar Recebimento Pix'}
+                                    : 'Confirmar Pagamento Recebido'}
                                 </span>
                               </button>
                             )}
                           </div>
                         </div>
                       </div>
+
+                      {isQrOpen && (
+                        <PixQrCodeSettlement
+                          orderCode={order.code}
+                          amount={netValue}
+                          recipientName={activeCourier.name}
+                          pixKey={activeCourier.pixKey}
+                          paymentStatus={order.paymentStatus}
+                          viewerRole="courier"
+                          isConfirming={confirmingReceiptOrderId === order.id}
+                          onConfirmAction={() =>
+                            handleConfirmReceiptClick(order.id)
+                          }
+                          confirmButtonLabel="Confirmar Pagamento Recebido"
+                        />
+                      )}
 
                       <OrderRatingBox
                         buttonLabel="Avaliar Solicitante / Lojista"
@@ -2253,9 +2476,9 @@ export function CourierBoard({
                   {activeCourier.propulsion || 'Combustão'}
                 </p>
                 <p className="text-[11px] text-emerald-700 font-medium">
-                  {isZeroFee
-                    ? 'Taxa zero (R$ 0,00) + Bônus 100% EV'
-                    : 'Taxa fixa padrão aplicada'}
+                  {hasFeeDiscount
+                    ? 'Desconto automático de 50% na taxa da plataforma (Bike/EV)'
+                    : 'Taxa padrão da categoria aplicada'}
                 </p>
               </div>
 
@@ -2277,7 +2500,7 @@ export function CourierBoard({
 
                 if (!vehicleModelDraft.trim() || !vehicleColorDraft.trim()) {
                   setIdentityError(
-                    'Informe o modelo e a cor do veículo para exibição segura aos clientes.'
+                    'Selecione a marca, o modelo e a cor do veículo para exibição segura aos clientes.'
                   );
                   return;
                 }
@@ -2384,20 +2607,26 @@ export function CourierBoard({
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div>
                   <label
                     htmlFor="courier-tab-vehicle-type"
                     className="block text-xs font-semibold text-zinc-700 mb-1"
                   >
-                    Categoria
+                    Tipo de Veículo
                   </label>
                   <select
                     id="courier-tab-vehicle-type"
                     value={vehicleTypeDraft}
                     onChange={(e) => {
                       const next = e.target.value as VehicleType;
+                      const prevGroup =
+                        getFipeGroupForVehicleType(vehicleTypeDraft);
+                      const nextGroup = getFipeGroupForVehicleType(next);
                       setVehicleTypeDraft(next);
+                      if (prevGroup !== nextGroup) {
+                        setVehicleModelDraft('');
+                      }
                       const allowed = getPropulsionOptionsForVehicle(next);
                       if (!allowed.includes(propulsionDraft)) {
                         setPropulsionDraft(allowed[0]);
@@ -2438,63 +2667,19 @@ export function CourierBoard({
                     ))}
                   </select>
                 </div>
-
-                <div>
-                  <label
-                    htmlFor="courier-tab-plate"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Placa {vehicleTypeDraft === 'Bike' ? '(Opcional)' : '*'}
-                  </label>
-                  <input
-                    id="courier-tab-plate"
-                    type="text"
-                    value={plateDraft}
-                    disabled={vehicleTypeDraft === 'Bike'}
-                    onChange={(e) =>
-                      setPlateDraft(formatPlateInput(e.target.value))
-                    }
-                    placeholder={
-                      vehicleTypeDraft === 'Bike' ? 'Não exigida' : 'ABC1D23'
-                    }
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs uppercase text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none disabled:bg-zinc-100 disabled:text-zinc-500"
-                  />
-                </div>
-
-                <div className="sm:col-span-2 lg:col-span-2">
-                  <label
-                    htmlFor="courier-tab-model"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Modelo do Veículo *
-                  </label>
-                  <input
-                    id="courier-tab-model"
-                    type="text"
-                    value={vehicleModelDraft}
-                    onChange={(e) => setVehicleModelDraft(e.target.value)}
-                    placeholder="Ex: Honda CG 160 / Caloi Aro 29 / Fiat Fiorino"
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
-                  />
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="courier-tab-color"
-                    className="block text-xs font-semibold text-zinc-700 mb-1"
-                  >
-                    Cor *
-                  </label>
-                  <input
-                    id="courier-tab-color"
-                    type="text"
-                    value={vehicleColorDraft}
-                    onChange={(e) => setVehicleColorDraft(e.target.value)}
-                    placeholder="Ex: Preta"
-                    className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
-                  />
-                </div>
               </div>
+
+              <FipeVehicleFields
+                key={activeCourier.id}
+                idPrefix="courier-tab"
+                vehicleType={vehicleTypeDraft}
+                vehicleModel={vehicleModelDraft}
+                vehicleColor={vehicleColorDraft}
+                plate={plateDraft}
+                onChangeVehicleModel={setVehicleModelDraft}
+                onChangeVehicleColor={setVehicleColorDraft}
+                onChangePlate={setPlateDraft}
+              />
 
               {identityError && (
                 <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-medium text-red-700">
@@ -2560,17 +2745,18 @@ export function CourierBoard({
               </div>
             )}
 
-            {/* Zero-Fee Clean Mobility Summary */}
-            {isZeroFee && (
+            {/* 50% Fee Discount Clean Mobility Summary */}
+            {hasFeeDiscount && (
               <div className="flex items-start gap-2.5 rounded-xl border border-emerald-200 bg-emerald-50/70 p-4 text-xs text-emerald-950">
                 <Zap
                   className="h-4 w-4 text-emerald-600 shrink-0 mt-0.5"
                   aria-hidden="true"
                 />
                 <span>
-                  <strong>Incentivo à Mobilidade Limpa ativo:</strong> sua taxa da
-                  plataforma é <strong>R$ 0,00</strong> e 100% da taxa do app é
-                  revertida diretamente no seu ganho líquido em Porto Alegre.
+                  <strong>Desconto Mobilidade Limpa ativo (-50%):</strong> bicicletas
+                  e veículos elétricos recebem{' '}
+                  <strong>50% de desconto automático</strong> na taxa operacional da
+                  plataforma em comparação à categoria a combustão em Porto Alegre.
                 </span>
               </div>
             )}

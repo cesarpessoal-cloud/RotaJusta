@@ -24,6 +24,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { CourierAvatar } from './CourierAvatar';
+import { FipeVehicleFields } from './FipeVehicleFields';
 import { LegalDocTab, LegalModal } from './LegalModal';
 import { PWAInstallButton } from './PWAInstallButton';
 import {
@@ -46,14 +47,12 @@ import {
   lookupCnpjBrasilApi,
   onlyDigits,
 } from '../utils/documentValidation';
-import {
-  formatPlateInput,
-  isValidBrazilianPlate,
-} from '../utils/courierIdentity';
+import { isValidBrazilianPlate } from '../utils/courierIdentity';
+import { getFipeGroupForVehicleType } from '../utils/fipeApi';
 import { isValidEmail, normalizeEmail } from '../utils/emailValidation';
 import { compressImageToJpeg } from '../utils/imageCompression';
 import { getPixKeyPlaceholder, PIX_KEY_TYPES } from '../utils/pix';
-import { isZeroFeePropulsion } from '../utils/pricing';
+import { hasCleanMobilityDiscount } from '../utils/pricing';
 import {
   BIKE_RADIUS_OPTIONS,
   getVehicleCompatibilityLabel,
@@ -166,7 +165,12 @@ export function AuthScreen({
     regChoice === 'pj_lojista' ? 'PJ' : 'PF';
 
   const handleVehicleTypeChange = (nextVehicle: VehicleType) => {
+    const prevGroup = getFipeGroupForVehicleType(vehicleType);
+    const nextGroup = getFipeGroupForVehicleType(nextVehicle);
     setVehicleType(nextVehicle);
+    if (prevGroup !== nextGroup) {
+      setRegVehicleModel('');
+    }
     if (nextVehicle === 'Bike') {
       setPropulsion((prev) =>
         prev === 'Combustão' || prev === 'Propulsão Humana (Convencional)'
@@ -525,7 +529,7 @@ export function AuthScreen({
     if (regRole === 'entregador') {
       if (!regVehicleModel.trim() || !regVehicleColor.trim()) {
         setRegError(
-          'Informe o modelo e a cor do veículo (ex.: Honda CG 160 / Preta) para identificação do cliente.'
+          'Selecione a marca, o modelo e a cor do veículo para identificação segura do cliente.'
         );
         return;
       }
@@ -1352,17 +1356,17 @@ export function AuthScreen({
                     </div>
                   )}
 
-                  {isZeroFeePropulsion(propulsion) && (
+                  {hasCleanMobilityDiscount(propulsion, vehicleType) && (
                     <p className="rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs text-emerald-800">
                       <CheckCircle2
                         className="inline h-3.5 w-3.5 mr-1 text-emerald-600"
                         aria-hidden="true"
                       />
                       {propulsion === 'Propulsão Humana (Convencional)'
-                        ? 'Selo Bike · Taxa Zero: plataforma R$ 0,00.'
+                        ? 'Selo Bike · Desconto automático de 50% na taxa operacional da plataforma.'
                         : propulsion === 'Elétrica / Pedal Assistido (E-Bike)'
-                        ? 'Selo E-Bike · Bônus EV: taxa R$ 0,00 revertida ao ciclista.'
-                        : 'Selo Elétrico · Bônus EV: taxa R$ 0,00 revertida ao condutor.'}
+                        ? 'Selo E-Bike · Desconto automático de 50% na taxa operacional da plataforma.'
+                        : 'Selo Elétrico · Desconto automático de 50% na taxa operacional da plataforma.'}
                     </p>
                   )}
 
@@ -1425,79 +1429,16 @@ export function AuthScreen({
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                      <div>
-                        <label
-                          htmlFor="reg-vehicle-model"
-                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
-                        >
-                          Modelo do Veículo <span className="text-red-600">*</span>
-                        </label>
-                        <input
-                          id="reg-vehicle-model"
-                          type="text"
-                          value={regVehicleModel}
-                          onChange={(e) => setRegVehicleModel(e.target.value)}
-                          placeholder={
-                            vehicleType === 'Bike'
-                              ? 'Ex: Caloi E-Vibe'
-                              : vehicleType === 'Moto'
-                              ? 'Ex: Honda CG 160'
-                              : 'Ex: Fiat Fiorino'
-                          }
-                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="reg-vehicle-color"
-                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
-                        >
-                          Cor do Veículo <span className="text-red-600">*</span>
-                        </label>
-                        <input
-                          id="reg-vehicle-color"
-                          type="text"
-                          value={regVehicleColor}
-                          onChange={(e) => setRegVehicleColor(e.target.value)}
-                          placeholder="Ex: Preta"
-                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none"
-                        />
-                      </div>
-
-                      <div>
-                        <label
-                          htmlFor="reg-vehicle-plate"
-                          className="block text-[11px] font-semibold text-zinc-700 mb-1"
-                        >
-                          Placa do Veículo{' '}
-                          {vehicleType === 'Bike' ? (
-                            <span className="font-normal text-zinc-500">
-                              (opcional)
-                            </span>
-                          ) : (
-                            <span className="text-red-600">*</span>
-                          )}
-                        </label>
-                        <input
-                          id="reg-vehicle-plate"
-                          type="text"
-                          maxLength={8}
-                          disabled={vehicleType === 'Bike'}
-                          value={regVehiclePlate}
-                          onChange={(e) =>
-                            setRegVehiclePlate(formatPlateInput(e.target.value))
-                          }
-                          placeholder={
-                            vehicleType === 'Bike'
-                              ? 'Não exige placa'
-                              : 'ABC1D23'
-                          }
-                          className="w-full rounded-lg border border-zinc-300 bg-white px-3 py-2 font-mono text-xs font-bold uppercase tracking-wider text-zinc-900 placeholder:font-normal placeholder:tracking-normal placeholder:text-zinc-400 focus:border-emerald-600 focus:outline-none disabled:cursor-not-allowed disabled:bg-zinc-100"
-                        />
-                      </div>
-                    </div>
+                    <FipeVehicleFields
+                      idPrefix="reg"
+                      vehicleType={vehicleType}
+                      vehicleModel={regVehicleModel}
+                      vehicleColor={regVehicleColor}
+                      plate={regVehiclePlate}
+                      onChangeVehicleModel={setRegVehicleModel}
+                      onChangeVehicleColor={setRegVehicleColor}
+                      onChangePlate={setRegVehiclePlate}
+                    />
                   </div>
 
                   <label className="flex items-center gap-2.5 rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 cursor-pointer text-xs text-zinc-800">
